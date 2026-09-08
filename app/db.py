@@ -124,6 +124,11 @@ def connect():
 
 def init_db(title: str = "Shared workspace") -> None:
     """Create the schema and seed the single M0 workspace. Idempotent."""
+    # SQLite will not create the directory for us, and a host's mounted volume
+    # may hand us an empty path. Crashing on a missing folder helps nobody.
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Database: {DB_PATH}", flush=True)
+
     with connect() as conn:
         conn.executescript(SCHEMA)
         row = conn.execute("SELECT id FROM workspace WHERE slug = 'demo'").fetchone()
