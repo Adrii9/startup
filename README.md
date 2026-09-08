@@ -59,10 +59,14 @@ Each person has their own URL. The token is a path segment, which survives
 proxies and client-side URL rewriting better than a query string:
 
 ```
-https://<host>/u/adria-dev-token/mcp
-https://<host>/u/oscar-dev-token/mcp
-https://<host>/u/pau-dev-token/mcp
+https://<host>/u/<token>/mcp
 ```
+
+**Tokens never live in this repo.** Set `MEMBER_TOKENS` in the environment as
+`Adria:xxx,Oscar:yyy,Pau:zzz`, or set nothing and let the server mint random
+ones on first boot — it prints all three paths to the log at startup. Members
+keep their token across restarts, so a redeploy never invalidates a connector
+someone has already configured.
 
 > **`localhost` will not work.** Claude's connectors reach your server from
 > Anthropic's cloud, not from your laptop. Deploy to a public HTTPS host from
@@ -78,14 +82,14 @@ https://<host>/u/pau-dev-token/mcp
 For anything that does not speak MCP:
 
 ```bash
-curl -X POST https://<host>/u/oscar-dev-token/api/record \
+curl -X POST https://<host>/u/<token>/api/record \
   -H 'content-type: application/json' \
   -d '{"summary":"generated the cover","intent":"minimalist","artifact":"cover.png"}'
 ```
 
-The seeded tokens are fixed so connector URLs survive a rebuild. They are demo
-secrets — they become real ones, or OAuth, before anyone outside the three of
-you joins.
+A token is the whole of the auth story right now. That is fine for three people
+who know each other, and stops being fine the moment a workspace is shared with
+anyone else — at which point this becomes OAuth.
 
 ## What M0 deliberately does not have
 

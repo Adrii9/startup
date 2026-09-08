@@ -8,6 +8,7 @@ replaying the log, which is why `section` holds no content of its own.
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -85,13 +86,24 @@ CREATE TABLE IF NOT EXISTS cursor (
 );
 """
 
-# Fixed tokens so the three connector URLs stay valid across rebuilds.
-# Demo only -- these become real secrets (or OAuth) before anyone outside joins.
-SEED_MEMBERS = [
-    ("Adria", "adria-dev-token"),
-    ("Oscar", "oscar-dev-token"),
-    ("Pau", "pau-dev-token"),
-]
+ROSTER = ["Adria", "Oscar", "Pau"]
+
+
+def _seed_tokens() -> dict[str, str]:
+    """Tokens come from the environment, never from this file.
+
+    A token is the write key to the workspace, so it does not belong in source
+    control. Set MEMBER_TOKENS as "Adria:xxx,Oscar:yyy,Pau:zzz"; with nothing
+    set, each member gets a random one on first boot, printed once at startup.
+    Existing members keep the token they already have, so restarts are safe.
+    """
+    raw = os.environ.get("MEMBER_TOKENS", "").strip()
+    tokens = {}
+    for part in raw.split(","):
+        name, _, token = part.partition(":")
+        if name.strip() and token.strip():
+            tokens[name.strip()] = token.strip()
+    return tokens
 
 
 @contextmanager
@@ -123,11 +135,19 @@ def init_db(title: str = "Shared workspace") -> None:
         else:
             workspace_id = row["id"]
 
-        for name, token in SEED_MEMBERS:
-            conn.execute(
-                "INSERT OR IGNORE INTO member (workspace_id, name, token) VALUES (?, ?, ?)",
-                (workspace_id, name, token),
-            )
+        configured = _seed_tokens()
+        for name in ROSTER:
+            # Keyed on name, not token: a member who already exists keeps their
+            # token, so a restart never mints a duplicate or breaks live URLs.
+            existing = conn.execute(
+                "SELECT id FROM member WHERE workspace_id = ? AND name = ?",
+                (workspace_id, name),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO member (workspace_id, name, token) VALUES (?, ?, ?)",
+                    (workspace_id, name, configured.get(name) or secrets.token_urlsafe(12)),
+                )
         for member in conn.execute(
             "SELECT id FROM member WHERE workspace_id = ?", (workspace_id,)
         ):
@@ -135,3 +155,9 @@ def init_db(title: str = "Shared workspace") -> None:
                 "INSERT OR IGNORE INTO cursor (member_id, last_event_id) VALUES (?, 0)",
                 (member["id"],),
             )
+
+        print("Connector URLs -- append these paths to your public host:", flush=True)
+        for m in conn.execute(
+            "SELECT name, token FROM member WHERE workspace_id = ? ORDER BY id", (workspace_id,)
+        ):
+            print(f"  {m['name']:<8} /u/{m['token']}/mcp", flush=True)
