@@ -1,0 +1,29 @@
+# Fly deploy config. `fly launch` may want to rewrite parts of this -- decline,
+# it is already set up for the SQLite volume.
+
+app = "shared-context"
+primary_region = "mad"
+
+[build]
+
+[env]
+  WORKSPACE_DB = "/data/workspace.db"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = "suspend"
+  # Kept at 1 on purpose: a cold start can outlast a connector's patience, and
+  # an assistant that times out once tends to stop trying. Drop it to 0 later.
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# The log lives here. Without this the database is recreated empty on every
+# deploy, and one afternoon of work disappears without any error being raised.
+[mounts]
+  source = "workspace_data"
+  destination = "/data"
