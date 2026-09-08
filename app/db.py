@@ -13,9 +13,24 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(
-    os.environ.get("WORKSPACE_DB", Path(__file__).resolve().parent.parent / "workspace.db")
-)
+def _db_path() -> Path:
+    """Where the log lives.
+
+    Hosts that mount a volume announce it (Railway sets RAILWAY_VOLUME_MOUNT_PATH),
+    so follow that by default. Getting this wrong costs the whole log with no
+    error raised anywhere, which is why it is worth detecting rather than
+    trusting someone to remember a second environment variable.
+    """
+    explicit = os.environ.get("WORKSPACE_DB")
+    if explicit:
+        return Path(explicit)
+    mount = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if mount:
+        return Path(mount) / "workspace.db"
+    return Path(__file__).resolve().parent.parent / "workspace.db"
+
+
+DB_PATH = _db_path()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspace (
@@ -128,6 +143,20 @@ def init_db(title: str = "Shared workspace") -> None:
     # may hand us an empty path. Crashing on a missing folder helps nobody.
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     print(f"Database: {DB_PATH}", flush=True)
+
+    mount = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if not mount:
+        print(
+            "WARNING: no persistent volume detected. The log lives inside the "
+            "container and every redeploy will silently wipe it.",
+            flush=True,
+        )
+    elif not str(DB_PATH).startswith(mount.rstrip("/") + "/"):
+        print(
+            f"WARNING: a volume is mounted at {mount} but the database is at "
+            f"{DB_PATH}, outside it. Every redeploy will silently wipe the log.",
+            flush=True,
+        )
 
     with connect() as conn:
         conn.executescript(SCHEMA)
