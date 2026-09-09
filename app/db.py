@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS event (
     agent         TEXT NOT NULL DEFAULT 'unknown',
     kind          TEXT NOT NULL DEFAULT 'work',
     summary       TEXT NOT NULL,
+    details       TEXT,          -- the body; summary is only the headline
     intent        TEXT,
     intent_source TEXT,          -- 'stated' | 'inferred' | NULL
     rejected_json TEXT,          -- [{"option": ..., "reason": ...}] or NULL
@@ -121,6 +122,20 @@ def _seed_tokens() -> dict[str, str]:
     return tokens
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns to a database that predates them.
+
+    CREATE TABLE IF NOT EXISTS silently skips an existing table, so a schema
+    change would never reach a live workspace without this. Append-only data
+    makes migrations cheap: nothing to rewrite, only columns to add.
+    """
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(event)")}
+    for column, ddl in [("details", "TEXT")]:
+        if column not in have:
+            conn.execute(f"ALTER TABLE event ADD COLUMN {column} {ddl}")
+            print(f"migrated: event.{column} added", flush=True)
+
+
 @contextmanager
 def connect():
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -160,6 +175,7 @@ def init_db(title: str = "Shared workspace") -> None:
 
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         row = conn.execute("SELECT id FROM workspace WHERE slug = 'demo'").fetchone()
         if row is None:
             cur = conn.execute(

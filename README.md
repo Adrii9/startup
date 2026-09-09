@@ -39,10 +39,37 @@ The dual wrapper is not belt-and-braces. Claude and ChatGPT speak MCP; Gemini's
 consumer app is US-only for custom MCP servers, so Oscar comes in through
 `/api/*` or Gemini CLI. MCP is a convenience here, never a requirement.
 
+## History, and what is true now
+
+The log answers *what happened*. An assistant sitting down to work needs a
+different question answered: *what is true right now*. History grows forever;
+the standing summary does not.
+
+So `catch_up` leads with **the brief** — every entry not yet superseded, grouped
+into decisions in force, what the team knows, and what is still open. It is
+computed from the log on every read and never written. Each item collapses to
+**one line**, because its job is to be an index that fits in every assistant's
+context however long the project runs; the body stays in the log for whoever
+needs it. If this ever stops fitting on a screen, it has stopped working.
+
+A decision keeps its reason in the brief. A decision without its reason gets
+quietly re-litigated.
+
+`supersedes` carries three meanings with one pointer: a decision reversed, a
+question answered, a fact corrected. Anything superseded drops out of the brief.
+
 ## The two tools
 
-- `catch_up()` — the document, plus everything that happened since your cursor.
-- `record(summary, intent, rejected, section, content, artifact, supersedes)`
+- `catch_up()` — the brief, the document, then everything since your cursor.
+- `record(summary, details, kind, intent, rejected, section, content, artifact, supersedes)`
+
+`kind` is one of `decision`, `fact`, `question`, `work`. The first three stay in
+the brief; `work` scrolls away into history. When a model omits it, it is
+inferred rather than rejected — a wrong guess is recoverable, a failed tool call
+in the middle of someone's work is not.
+
+`summary` is the headline; `details` is the substance. See [LINKING.md](LINKING.md)
+for the instructions that make an assistant do this without being asked.
 
 `intent` and `rejected` are first-class parameters of the only write tool, so a
 model cannot skip them without seeing them. Their descriptions explicitly

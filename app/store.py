@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 # Nudge thresholds, per the three rules in the architecture doc.
 STALE_MINUTES = 30
 STALE_EVENTS = 8
 COLLISION_MINUTES = 10
+
+
+KINDS = ("decision", "fact", "question", "work")
 
 
 @dataclass
@@ -25,6 +28,7 @@ class EventView:
     agent: str
     kind: str
     summary: str
+    details: str | None
     intent: str | None
     intent_source: str | None
     rejected: list[dict]
@@ -44,6 +48,20 @@ class SectionView:
 
 
 @dataclass
+class Brief:
+    """What is true *now*, as opposed to what happened.
+
+    Computed from the log every time, never written. Entries collapse to one
+    line each: this is an index, and its job is to stay small enough to sit in
+    every assistant's context no matter how long the project runs.
+    """
+
+    decisions: list[EventView] = field(default_factory=list)
+    facts: list[EventView] = field(default_factory=list)
+    questions: list[EventView] = field(default_factory=list)
+
+
+@dataclass
 class Envelope:
     """What every tool returns: the result, plus the delta, always."""
 
@@ -51,6 +69,7 @@ class Envelope:
     since_id: int
     new_events: list[EventView] = field(default_factory=list)
     document: list[SectionView] | None = None
+    brief: Brief | None = None
     hints: list[str] = field(default_factory=list)
     state: dict = field(default_factory=dict)
 
@@ -138,6 +157,7 @@ def _events_since(
             agent=r["agent"],
             kind=r["kind"],
             summary=r["summary"],
+            details=r["details"],
             intent=r["intent"],
             intent_source=r["intent_source"],
             rejected=json.loads(r["rejected_json"]) if r["rejected_json"] else [],
@@ -252,6 +272,51 @@ def _state(conn: sqlite3.Connection, workspace_id: int) -> dict:
     }
 
 
+def build_brief(conn: sqlite3.Connection, ws_id: int) -> Brief:
+    """Everything still in force, grouped by kind.
+
+    'Still in force' is simply 'not superseded by a later entry', which is why
+    supersedes_id doubles as the way to answer a question or reverse a decision
+    -- one pointer, three meanings, no extra schema.
+    """
+    live = [e for e in _events_since(conn, ws_id, 0, exclude_member=None) if not e.is_dead]
+    return Brief(
+        decisions=[e for e in live if e.kind == "decision"],
+        facts=[e for e in live if e.kind == "fact"],
+        questions=[e for e in live if e.kind == "question"],
+    )
+
+
+def workspace_id(conn: sqlite3.Connection, slug: str = "demo") -> int:
+    return conn.execute("SELECT id FROM workspace WHERE slug = ?", (slug,)).fetchone()["id"]
+
+
+def version(conn: sqlite3.Connection, ws_id: int) -> tuple[int, int]:
+    """A cheap marker of 'has anything changed'.
+
+    Two integers are enough because both tables are append-only, so neither
+    counter can ever move backwards.
+    """
+    ev = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS m FROM event WHERE workspace_id = ?", (ws_id,)
+    ).fetchone()["m"]
+    rev = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM section_revision").fetchone()["m"]
+    return (ev, rev)
+
+
+def snapshot(conn: sqlite3.Connection, ws_id: int) -> dict:
+    """Everything the human-facing page needs, in one read."""
+    state = _state(conn, ws_id)
+    brief = build_brief(conn, ws_id)
+    return {
+        "title": state["title"],
+        "members_active_today": state["members_active_today"],
+        "sections": [asdict(s) for s in _read_document(conn, ws_id)],
+        "events": [asdict(e) for e in _events_since(conn, ws_id, 0, exclude_member=None)],
+        "brief": asdict(brief),
+    }
+
+
 # --- the two operations ------------------------------------------------------
 
 
@@ -264,6 +329,7 @@ def catch_up(conn: sqlite3.Connection, member: sqlite3.Row) -> Envelope:
         since_id=since,
         new_events=_events_since(conn, workspace_id, since, exclude_member=None),
         document=_read_document(conn, workspace_id),
+        brief=build_brief(conn, workspace_id),
         hints=hints,
         state=_state(conn, workspace_id),
     )
@@ -275,6 +341,8 @@ def record(
     *,
     agent: str = "unknown",
     summary: str,
+    details: str = "",
+    kind: str = "",
     intent: str = "",
     intent_source: str = "stated",
     rejected=None,
@@ -309,18 +377,24 @@ def record(
         else:
             section_id = row["id"]
 
+    if kind not in KINDS:
+        # Infer rather than reject: a wrong guess here is recoverable, a failed
+        # tool call in the middle of someone's work is not.
+        kind = "decision" if (rejected_list or supersedes) else "work"
+
     cur = conn.execute(
         """
-        INSERT INTO event (workspace_id, member_id, agent, kind, summary, intent,
+        INSERT INTO event (workspace_id, member_id, agent, kind, summary, details, intent,
                            intent_source, rejected_json, section_id, supersedes_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             workspace_id,
             member["id"],
             agent,
-            "artifact" if artifact else ("decision" if supersedes else "work"),
+            kind,
             summary,
+            details or None,
             intent or None,
             intent_source if intent else None,
             json.dumps(rejected_list, ensure_ascii=False) if rejected_list else None,
