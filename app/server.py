@@ -23,7 +23,13 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 
 from . import db, render, store
 
@@ -175,6 +181,16 @@ def record(
             )
         ),
     ] = None,
+    refs: Annotated[
+        list | None,
+        Field(
+            description=(
+                "Entry numbers this one builds on, as [12, 47]. Use it when you are "
+                "acting on, answering or extending something a teammate wrote -- it is "
+                "what lets anyone trace where a piece of work came from."
+            )
+        ),
+    ] = None,
     section: Annotated[
         str, Field(description="Key of the document section this touches, e.g. 'intro'.")
     ] = "",
@@ -217,6 +233,7 @@ def record(
             kind=kind,
             intent=intent,
             rejected=rejected,
+            refs=refs,
             section=section,
             content=content,
             artifact=artifact,
@@ -258,6 +275,7 @@ async def api_record(request: Request) -> JSONResponse:
             kind=payload.get("kind", ""),
             intent=payload.get("intent", ""),
             rejected=payload.get("rejected"),
+            refs=payload.get("refs"),
             section=payload.get("section", ""),
             content=payload.get("content", ""),
             artifact=payload.get("artifact", ""),
@@ -269,7 +287,8 @@ async def api_record(request: Request) -> JSONResponse:
 # --- the human view ----------------------------------------------------------
 
 
-PAGE = (Path(__file__).resolve().parent / "static" / "index.html").read_text()
+STATIC = Path(__file__).resolve().parent / "static"
+MIME = {".css": "text/css", ".js": "text/javascript", ".html": "text/html"}
 
 
 @mcp.custom_route("/", methods=["GET"])
@@ -279,7 +298,21 @@ async def web_view(request: Request) -> HTMLResponse:
     This is the answer to the onboarding problem: a new teammate opens a link,
     sees the project moving, and wires up their own assistant afterwards.
     """
-    return HTMLResponse(PAGE)
+    return HTMLResponse((STATIC / "index.html").read_text())
+
+
+@mcp.custom_route("/s/{name}", methods=["GET"])
+async def static_file(request: Request) -> Response:
+    """Serve the shell's assets, and nothing else.
+
+    Resolved against the static directory and checked to still be inside it, so
+    a crafted name cannot walk out of the folder.
+    """
+    name = request.path_params["name"]
+    path = (STATIC / name).resolve()
+    if not path.is_file() or STATIC.resolve() not in path.parents:
+        return PlainTextResponse("not found", status_code=404)
+    return Response(path.read_bytes(), media_type=MIME.get(path.suffix, "application/octet-stream"))
 
 
 @mcp.custom_route("/api/state", methods=["GET"])

@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS event (
     intent        TEXT,
     intent_source TEXT,          -- 'stated' | 'inferred' | NULL
     rejected_json TEXT,          -- [{"option": ..., "reason": ...}] or NULL
+    refs_json     TEXT,          -- [12, 47] -- earlier entries this builds on
     section_id    INTEGER REFERENCES section(id),
     supersedes_id INTEGER REFERENCES event(id),
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -130,7 +131,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     makes migrations cheap: nothing to rewrite, only columns to add.
     """
     have = {row["name"] for row in conn.execute("PRAGMA table_info(event)")}
-    for column, ddl in [("details", "TEXT")]:
+    for column, ddl in [("details", "TEXT"), ("refs_json", "TEXT")]:
         if column not in have:
             conn.execute(f"ALTER TABLE event ADD COLUMN {column} {ddl}")
             print(f"migrated: event.{column} added", flush=True)

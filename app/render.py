@@ -13,7 +13,7 @@ RULE = "─" * 52
 
 
 def _event_block(e: EventView) -> str:
-    head = f"#{e.id} · {e.member_name} / {e.agent} · [{e.kind}] {e.summary}"
+    head = f"#{e.id} · {e.member_name} / {e.agent} · [{e.level}] {e.summary}"
     lines = [head]
     pad = "      "
     if e.details:
@@ -28,6 +28,8 @@ def _event_block(e: EventView) -> str:
     for r in e.rejected:
         reason = f" -- {r['reason']}" if r.get("reason") else ""
         lines.append(f"{pad}dropped: {r['option']}{reason}")
+    if e.refs:
+        lines.append(f"{pad}builds on: {', '.join('#' + str(r) for r in e.refs)}")
     if e.section_key:
         lines.append(f"{pad}section: {e.section_key}")
     if e.artifact_url:
@@ -43,7 +45,7 @@ def _brief_line(e: EventView) -> str:
     lives in the log for whoever needs it.
     """
     line = f"#{e.id} · {e.summary}"
-    if e.kind == "decision" and e.intent:
+    if e.level == "decision" and e.intent:
         line += f" — because: {e.intent}"
     return line
 

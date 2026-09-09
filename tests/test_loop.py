@@ -231,7 +231,8 @@ def test_details_reach_the_delta(conn):
     )
     out = render.render(store.catch_up(conn, member(conn, "Adria")))
     assert "Two paragraphs, 180 words, no citations." in out
-    assert "[work] drafted the abstract" in out
+    # Declared as work, and with no structure to promote it, it reads as a note.
+    assert "[note] drafted the abstract" in out
 
 
 def test_kind_is_inferred_when_the_model_omits_it(conn):
@@ -240,6 +241,61 @@ def test_kind_is_inferred_when_the_model_omits_it(conn):
     standing = render.render(store.catch_up(conn, member(conn, "Pau"))).split(
         "WHERE THINGS STAND")[1].split("DOCUMENT")[0]
     assert "picked option B" in standing  # landed as a decision, not lost as work
+
+
+def test_level_is_derived_from_structure_not_from_what_the_model_claims(conn):
+    lvl = lambda **kw: store.derive_level(**kw)[0]
+
+    # An artifact outranks a dropped option: producing a file with a choice along
+    # the way stays work, and does not crowd the standing brief.
+    assert lvl(artifact_url="cover.png", rejected=[{"option": "a", "reason": "b"}]) == "artifact"
+
+    # Structure promotes work it was never told about.
+    assert lvl(kind="work", rejected=[{"option": "a", "reason": "b"}]) == "decision"
+    assert lvl(kind="work", supersedes_id=7) == "decision"
+
+    # But it never demotes: a declared decision stays one with no structure at all.
+    assert lvl(kind="decision") == "decision"
+    assert lvl(kind="fact") == "fact"
+    assert lvl(kind="question") == "question"
+
+    # supersedes means "this replaces that", which is just as often a question
+    # being answered as a decision being reversed. It must not overwrite a
+    # declared kind, or every answer lands in the wrong column of the brief.
+    assert lvl(kind="fact", supersedes_id=3) == "fact"
+    assert lvl(kind="question", supersedes_id=3) == "question"
+
+    # Supersedes outranks even an artifact -- replacing something is a decision.
+    assert lvl(supersedes_id=3, artifact_url="x.png") == "decision"
+
+    assert lvl(kind="work", section_key="intro", has_content=True) == "write"
+    assert lvl(kind="work") == "note"
+
+
+def test_artifact_with_a_dropped_option_stays_out_of_the_brief(conn):
+    """The rule Adria picked, end to end rather than at the unit."""
+    store.record(
+        conn, member(conn, "Oscar"), kind="work",
+        summary="Cover image generated", artifact="cover-v3.png",
+        rejected=[{"option": "busy collage", "reason": "illegible below 200px"}],
+    )
+    out = render.render(store.catch_up(conn, member(conn, "Pau")))
+    standing = out.split("WHERE THINGS STAND")[1].split("DOCUMENT")[0]
+    assert "Cover image generated" not in standing
+    assert "[artifact] Cover image generated" in out  # still in the history
+
+
+def test_refs_survive_whatever_shape_they_arrive_in(conn):
+    assert store.normalise_refs([12, "47", "#3"]) == [12, 47, 3]
+    assert store.normalise_refs("#8") == [8]
+    assert store.normalise_refs([5, 5, "x", 0, -2]) == [5]
+    assert store.normalise_refs(None) == []
+
+    store.record(conn, member(conn, "Adria"), summary="first")
+    out = render.render(store.record(conn, member(conn, "Oscar"), summary="builds on it", refs=[1]))
+    assert "builds on: #1" not in out           # not echoed back to its own author
+    out = render.render(store.catch_up(conn, member(conn, "Pau")))
+    assert "builds on: #1" in out
 
 
 def test_collision_hint_when_someone_just_touched_the_section(conn):

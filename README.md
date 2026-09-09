@@ -28,12 +28,30 @@ chasing a `NULL`.
 ## Shape
 
 ```
-app/db.py      schema + connection. The event table is append-only and is the
-               only source of truth; every other table is a projection.
-app/store.py   the two operations. No MCP or HTTP import anywhere in it.
-app/render.py  the envelope: what an assistant actually reads.
-app/server.py  two wrappers over the same functions — MCP, and plain HTTP.
+app/db.py            schema + connection. The event table is append-only and is
+                     the only source of truth; every other table is a projection.
+app/store.py         the two operations, and derive_level. No MCP or HTTP import.
+app/render.py        the envelope: what an assistant actually reads.
+app/server.py        wrappers over the same functions — MCP, plain HTTP, the page.
+app/static/          the reader's view: board, graph, detail panel, CA/ES/EN.
 ```
+
+## What an entry counts as
+
+`derive_level` decides, and the writer does not. Declaration sets the category
+where one was given — a fact answering a question stays a fact — and structure
+**promotes** work that turned out to be more than work: a dropped option or a
+superseded entry makes it a decision whether or not the model thought to say so.
+Structure never demotes.
+
+Within plain work an artifact outranks a dropped option, so producing a file
+with a choice along the way stays history instead of crowding the brief.
+
+The point is that a model cannot inflate the importance of its own entry, and
+three different models cannot drift apart on what counts as a decision, because
+none of them is being asked to judge. The detail panel in the web view says out
+loud which field a level came from, and whether that level survives into the
+brief — the rules are meant to be auditable, not magic.
 
 The dual wrapper is not belt-and-braces. Claude and ChatGPT speak MCP; Gemini's
 consumer app is US-only for custom MCP servers, so Oscar comes in through

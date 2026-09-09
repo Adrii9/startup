@@ -20,6 +20,48 @@ COLLISION_MINUTES = 10
 
 KINDS = ("decision", "fact", "question", "work")
 
+# Levels that survive into the standing brief. The rest is history.
+IN_BRIEF = ("decision", "fact", "question")
+
+
+def derive_level(
+    *, supersedes_id=None, artifact_url=None, rejected=(), kind="", section_key=None, has_content=False
+) -> tuple[str, str]:
+    """What an entry counts as, and why.
+
+    Derived from the fields the writer actually filled in, never from what they
+    claim. A model cannot inflate the importance of its own entry, and three
+    different models cannot drift apart on what counts as a decision, because
+    none of them is being asked to judge.
+
+    Structure can only ever *promote*, never demote. A declared fact answering
+    an open question stays a fact; work that dropped an option becomes a
+    decision whether or not the writer thought to say so. Within plain work, an
+    artifact outranks a dropped option, so producing a file with a choice along
+    the way does not crowd the brief.
+    """
+    # Declaration sets the category where the writer gave one. `supersedes` is
+    # orthogonal to it: it says "this replaces that", and that can just as well
+    # be a question being answered or a fact corrected as a decision reversed.
+    if kind == "fact":
+        return "fact", "recorded as a fact"
+    if kind == "question":
+        return "question", "recorded as a question"
+    if kind == "decision":
+        return "decision", "recorded as a decision"
+
+    # Nothing useful declared: let the structure speak for whatever came in as
+    # plain work, promoting it when it turns out to be more than that.
+    if supersedes_id:
+        return "decision", "supersedes is set"
+    if artifact_url:
+        return "artifact", "an artifact came with it"
+    if rejected:
+        return "decision", "rejected is not empty"
+    if section_key and has_content:
+        return "write", "section and content came with it"
+    return "note", "only a summary came with it"
+
 
 @dataclass
 class EventView:
@@ -36,6 +78,9 @@ class EventView:
     supersedes_id: int | None
     artifact_url: str | None
     created_at: str
+    refs: list[int] = field(default_factory=list)
+    level: str = "note"
+    level_source: str = ""
     is_dead: bool = False  # superseded by a later event
 
 
@@ -118,6 +163,21 @@ def normalise_rejected(raw) -> list[dict]:
     return [r for r in out if r["option"]]
 
 
+def normalise_refs(raw) -> list[int]:
+    """Entry numbers this one builds on. Accept whatever shape a model sends."""
+    if raw is None:
+        return []
+    if isinstance(raw, (int, str)):
+        raw = [raw]
+    out = []
+    for item in raw:
+        try:
+            out.append(int(str(item).lstrip("#").strip()))
+        except ValueError:
+            continue
+    return [n for n in dict.fromkeys(out) if n > 0]
+
+
 def _dead_event_ids(conn: sqlite3.Connection, workspace_id: int) -> set[int]:
     rows = conn.execute(
         "SELECT DISTINCT supersedes_id FROM event "
@@ -131,11 +191,13 @@ def _events_since(
     conn: sqlite3.Connection, workspace_id: int, since_id: int, exclude_member: int | None
 ) -> list[EventView]:
     sql = """
-        SELECT e.*, m.name AS member_name, s.key AS section_key, a.url AS artifact_url
+        SELECT e.*, m.name AS member_name, s.key AS section_key, a.url AS artifact_url,
+               r.id AS revision_id
         FROM event e
         JOIN member m ON m.id = e.member_id
         LEFT JOIN section s ON s.id = e.section_id
         LEFT JOIN artifact a ON a.event_id = e.id
+        LEFT JOIN section_revision r ON r.event_id = e.id
         WHERE e.workspace_id = ? AND e.id > ?
     """
     params: list = [workspace_id, since_id]
@@ -145,25 +207,39 @@ def _events_since(
     sql += " ORDER BY e.id"
 
     dead = _dead_event_ids(conn, workspace_id)
-    return [
-        EventView(
-            id=r["id"],
-            member_name=r["member_name"],
-            agent=r["agent"],
-            kind=r["kind"],
-            summary=r["summary"],
-            details=r["details"],
-            intent=r["intent"],
-            intent_source=r["intent_source"],
-            rejected=json.loads(r["rejected_json"]) if r["rejected_json"] else [],
-            section_key=r["section_key"],
+    out = []
+    for r in conn.execute(sql, params):
+        rejected = json.loads(r["rejected_json"]) if r["rejected_json"] else []
+        level, source = derive_level(
             supersedes_id=r["supersedes_id"],
             artifact_url=r["artifact_url"],
-            created_at=r["created_at"],
-            is_dead=r["id"] in dead,
+            rejected=rejected,
+            kind=r["kind"],
+            section_key=r["section_key"],
+            has_content=r["revision_id"] is not None,
         )
-        for r in conn.execute(sql, params)
-    ]
+        out.append(
+            EventView(
+                id=r["id"],
+                member_name=r["member_name"],
+                agent=r["agent"],
+                kind=r["kind"],
+                summary=r["summary"],
+                details=r["details"],
+                intent=r["intent"],
+                intent_source=r["intent_source"],
+                rejected=rejected,
+                section_key=r["section_key"],
+                supersedes_id=r["supersedes_id"],
+                artifact_url=r["artifact_url"],
+                created_at=r["created_at"],
+                refs=json.loads(r["refs_json"]) if r["refs_json"] else [],
+                level=level,
+                level_source=source,
+                is_dead=r["id"] in dead,
+            )
+        )
+    return out
 
 
 def _read_document(conn: sqlite3.Connection, workspace_id: int) -> list[SectionView]:
@@ -276,9 +352,9 @@ def build_brief(conn: sqlite3.Connection, ws_id: int) -> Brief:
     """
     live = [e for e in _events_since(conn, ws_id, 0, exclude_member=None) if not e.is_dead]
     return Brief(
-        decisions=[e for e in live if e.kind == "decision"],
-        facts=[e for e in live if e.kind == "fact"],
-        questions=[e for e in live if e.kind == "question"],
+        decisions=[e for e in live if e.level == "decision"],
+        facts=[e for e in live if e.level == "fact"],
+        questions=[e for e in live if e.level == "question"],
     )
 
 
@@ -341,6 +417,7 @@ def record(
     intent: str = "",
     intent_source: str = "stated",
     rejected=None,
+    refs=None,
     section: str = "",
     section_title: str = "",
     content: str = "",
@@ -372,16 +449,17 @@ def record(
         else:
             section_id = row["id"]
 
+    # `kind` is only a declaration now; what an entry counts as is derived on
+    # read by derive_level. An unrecognised value costs nothing, so never reject.
     if kind not in KINDS:
-        # Infer rather than reject: a wrong guess here is recoverable, a failed
-        # tool call in the middle of someone's work is not.
-        kind = "decision" if (rejected_list or supersedes) else "work"
+        kind = "work"
+    ref_list = normalise_refs(refs)
 
     cur = conn.execute(
         """
         INSERT INTO event (workspace_id, member_id, agent, kind, summary, details, intent,
-                           intent_source, rejected_json, section_id, supersedes_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           intent_source, rejected_json, refs_json, section_id, supersedes_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             workspace_id,
@@ -393,6 +471,7 @@ def record(
             intent or None,
             intent_source if intent else None,
             json.dumps(rejected_list, ensure_ascii=False) if rejected_list else None,
+            json.dumps(ref_list) if ref_list else None,
             section_id,
             supersedes or None,
         ),
