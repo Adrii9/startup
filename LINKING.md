@@ -29,9 +29,14 @@ change things while we talk.
 - a question is left hanging → `kind: "question"`
 - we produce something → `kind: "work"`
 
-Do not call `record` on every turn. A log of everything is another chat
-transcript, and nobody reads chat transcripts — that is the problem this
-workspace exists to solve.
+**At the end of any exchange where we worked something out, record it.** Err on
+the side of recording: a thin entry can be improved later, a lost decision
+cannot be recovered. If you are unsure whether something is worth an entry, it
+is.
+
+What does not need recording is the step-by-step of how we got there — one
+entry per thing established, not one per turn. A log of everything is another
+chat transcript, and nobody reads chat transcripts.
 
 **When a stretch of work ends, call `record` once** summarising what we worked
 out, what we were aiming for, and what we tried and abandoned. That last part
