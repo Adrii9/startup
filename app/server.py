@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -85,11 +86,24 @@ def _agent() -> str:
     return name.split("/")[0][:24] or "unknown"
 
 
+UNKNOWN_TOKEN = (
+    "This connector is not recognised by the workspace. Its URL should end in "
+    "/u/<your token>/mcp -- check it against the one you were given, and note "
+    "that tokens change if the workspace is reset."
+)
+
+
 def _member(conn):
+    """No fallback. An unrecognised token must fail, not quietly become someone.
+
+    M0 let a tokenless call act as the first member so the loop could be tested
+    with one assistant. Kept any longer, that turns a mistyped connector URL
+    into entries silently attributed to the wrong person.
+    """
     member = store.resolve_member(conn, _token())
-    # M0 only: a bare /mcp with no token acts as the first seeded member so the
-    # loop can be tested with a single assistant. M1 makes the token required.
-    return member or store.default_member(conn)
+    if member is None:
+        raise ToolError(UNKNOWN_TOKEN)
+    return member
 
 
 # --- the two tools -----------------------------------------------------------
@@ -219,7 +233,9 @@ async def api_catch_up(request: Request) -> JSONResponse:
     with db.connect() as conn:
         member = store.resolve_member(
             conn, request.query_params.get("k") or request.headers.get("x-member-token")
-        ) or store.default_member(conn)
+        )
+        if member is None:
+            return JSONResponse({"error": UNKNOWN_TOKEN}, status_code=403)
         env = store.catch_up(conn, member)
         return JSONResponse({"text": render.render(env)})
 
@@ -230,7 +246,9 @@ async def api_record(request: Request) -> JSONResponse:
     with db.connect() as conn:
         member = store.resolve_member(
             conn, request.query_params.get("k") or request.headers.get("x-member-token")
-        ) or store.default_member(conn)
+        )
+        if member is None:
+            return JSONResponse({"error": UNKNOWN_TOKEN}, status_code=403)
         env = store.record(
             conn,
             member,

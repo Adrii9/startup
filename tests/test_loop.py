@@ -50,6 +50,30 @@ def test_migration_adds_columns_without_touching_live_data(tmp_path, monkeypatch
         assert c.execute("SELECT token FROM member WHERE name='Adria'").fetchone()["token"] == "t"
 
 
+def test_unknown_token_resolves_to_nobody(conn):
+    """The server turns this into a refusal. Silently becoming member #1 is how
+    a mistyped connector URL ends up writing entries under someone else's name."""
+    assert store.resolve_member(conn, "not-a-real-token") is None
+    assert store.resolve_member(conn, "") is None
+    assert store.resolve_member(conn, None) is None
+    real = conn.execute("SELECT token FROM member WHERE name='Oscar'").fetchone()["token"]
+    assert store.resolve_member(conn, real)["name"] == "Oscar"
+
+
+def test_configured_tokens_are_used_and_survive_a_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cfg.db")
+    monkeypatch.setenv("MEMBER_TOKENS", "Adria:aaa111,Oscar:bbb222,Pau:ccc333")
+    db.init_db()
+    with db.connect() as c:
+        assert store.resolve_member(c, "bbb222")["name"] == "Oscar"
+
+    # A later boot without the variable must not re-mint anyone's token.
+    monkeypatch.delenv("MEMBER_TOKENS")
+    db.init_db()
+    with db.connect() as c:
+        assert store.resolve_member(c, "bbb222")["name"] == "Oscar"
+
+
 def test_delta_reaches_the_other_member(conn):
     adria, oscar = member(conn, "Adria"), member(conn, "Oscar")
 

@@ -206,8 +206,16 @@ def init_db(title: str = "Shared workspace") -> None:
                 (member["id"],),
             )
 
-        print("Connector URLs -- append these paths to your public host:", flush=True)
-        for m in conn.execute(
+        # Printing a token puts it in the deploy log, in screen shares and in
+        # screenshots. Only do it when we minted it ourselves and nobody could
+        # otherwise know it; when tokens are configured, the operator has them.
+        members = conn.execute(
             "SELECT name, token FROM member WHERE workspace_id = ? ORDER BY id", (workspace_id,)
-        ):
-            print(f"  {m['name']:<8} /u/{m['token']}/mcp", flush=True)
+        ).fetchall()
+        if configured:
+            print(f"Members: {', '.join(m['name'] for m in members)} (tokens from MEMBER_TOKENS)",
+                  flush=True)
+        else:
+            print("Connector URLs -- append these paths to your public host:", flush=True)
+            for m in members:
+                print(f"  {m['name']:<8} /u/{m['token']}/mcp", flush=True)

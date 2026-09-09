@@ -88,11 +88,6 @@ def resolve_member(conn: sqlite3.Connection, token: str | None) -> sqlite3.Row |
     return conn.execute("SELECT * FROM member WHERE token = ?", (token,)).fetchone()
 
 
-def default_member(conn: sqlite3.Connection) -> sqlite3.Row:
-    """M0 only: a bare /mcp with no token acts as the first seeded member."""
-    return conn.execute("SELECT * FROM member ORDER BY id LIMIT 1").fetchone()
-
-
 def normalise_rejected(raw) -> list[dict]:
     """Be liberal in what we accept.
 
