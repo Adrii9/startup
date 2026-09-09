@@ -190,7 +190,7 @@ def init_db(title: str = "Shared workspace") -> None:
             # Keyed on name, not token: a member who already exists keeps their
             # token, so a restart never mints a duplicate or breaks live URLs.
             existing = conn.execute(
-                "SELECT id FROM member WHERE workspace_id = ? AND name = ?",
+                "SELECT id, token FROM member WHERE workspace_id = ? AND name = ?",
                 (workspace_id, name),
             ).fetchone()
             if existing is None:
@@ -198,6 +198,13 @@ def init_db(title: str = "Shared workspace") -> None:
                     "INSERT INTO member (workspace_id, name, token) VALUES (?, ?, ?)",
                     (workspace_id, name, configured.get(name) or secrets.token_urlsafe(12)),
                 )
+            elif configured.get(name) and configured[name] != existing["token"]:
+                # MEMBER_TOKENS is authoritative when set, so a leaked token can
+                # be rotated without destroying the workspace to do it.
+                conn.execute(
+                    "UPDATE member SET token = ? WHERE id = ?", (configured[name], existing["id"])
+                )
+                print(f"rotated token for {name}", flush=True)
         for member in conn.execute(
             "SELECT id FROM member WHERE workspace_id = ?", (workspace_id,)
         ):

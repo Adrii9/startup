@@ -74,6 +74,27 @@ def test_configured_tokens_are_used_and_survive_a_restart(tmp_path, monkeypatch)
         assert store.resolve_member(c, "bbb222")["name"] == "Oscar"
 
 
+def test_setting_member_tokens_rotates_a_leaked_one(tmp_path, monkeypatch):
+    """Rotation must not require destroying the workspace to get it."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "rot.db")
+    db.init_db()
+    with db.connect() as c:
+        oscar = c.execute("SELECT id, token FROM member WHERE name='Oscar'").fetchone()
+        store.record(c, c.execute("SELECT * FROM member WHERE name='Oscar'").fetchone(),
+                     summary="work done before the rotation")
+        leaked = oscar["token"]
+
+    monkeypatch.setenv("MEMBER_TOKENS", "Oscar:fresh-secret")
+    db.init_db()
+
+    with db.connect() as c:
+        assert store.resolve_member(c, leaked) is None            # old one is dead
+        assert store.resolve_member(c, "fresh-secret")["name"] == "Oscar"
+        assert store.resolve_member(c, "fresh-secret")["id"] == oscar["id"]  # same person
+        events = c.execute("SELECT summary FROM event").fetchall()
+        assert events[0]["summary"] == "work done before the rotation"  # history intact
+
+
 def test_delta_reaches_the_other_member(conn):
     adria, oscar = member(conn, "Adria"), member(conn, "Oscar")
 
