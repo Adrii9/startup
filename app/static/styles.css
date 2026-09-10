@@ -276,6 +276,14 @@ input,select{font:inherit;color:inherit}
 
 /* ── single workspace: no context rail (multiple contexts are not built yet) ── */
 #app.solo{grid-template-columns:1fr}
+
+/* The implicit grid row is sized `auto`, and a grid item's min-height defaults to
+   auto too, so #main grew to fit every entry instead of stopping at the screen.
+   With body{overflow:hidden} that clipped everything below the fold and left the
+   inner scroller nothing to scroll. Cap the row at the viewport and let the
+   content scroll inside .board-scroll, which is where it was always meant to. */
+#app{grid-template-rows:minmax(0,1fr)}
+#main{min-height:0}
 .live.off::before{background:var(--faint);animation:none}
 .stand p.q{color:var(--amber)}
 .e-line .art,.art{color:var(--cyan)}
