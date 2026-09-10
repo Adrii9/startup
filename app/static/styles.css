@@ -285,46 +285,104 @@ input,select{font:inherit;color:inherit}
 .stand p.q{color:var(--amber)}
 .e-line .art,.art{color:var(--cyan)}
 
-/* ── sign in ─────────────────────────────────────────────── */
-.login{position:fixed;inset:0;display:grid;place-items:center;padding:20px;background:var(--bg);z-index:90}
-.login-card{width:min(420px,100%);background:#131317;border:1px solid var(--line2);border-radius:16px;
-  padding:26px 24px;display:flex;flex-direction:column;gap:12px;box-shadow:0 30px 80px rgba(0,0,0,.5)}
-.login-card h1{margin:0;font-size:17px;font-weight:650}
-.login-help{margin:0;font-size:13px;color:var(--dim);line-height:1.5}
-.login-card input{background:var(--card);border:1px solid var(--line);border-radius:9px;height:38px;
-  padding:0 11px;outline:none;font-size:13px}
-.login-card input:focus{border-color:var(--line2)}
-.login-card .primary-btn{height:36px;margin-top:4px}
-.login-err{margin:0;font-size:12.5px;color:var(--red)}
 
-/* ── rail footer: who is signed in ───────────────────────── */
-.side-bottom{display:flex;flex-direction:column;gap:6px}
-.whoami{display:flex;align-items:center;gap:6px;padding:0 4px;font-size:11.5px;color:var(--faint);min-width:0}
-.whoami span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#app.collapsed .whoami span{display:none}
-#app.collapsed .whoami{justify-content:center}
+/* ── sign in, and joining from an invite ─────────────────── */
+.login{position:fixed;inset:0;display:grid;place-items:center;padding:20px;background:var(--bg);z-index:90}
+.login-card{width:min(400px,100%);background:#131317;border:1px solid var(--line2);border-radius:18px;
+  padding:28px 26px;display:flex;flex-direction:column;gap:14px;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+.login-card h1{margin:0;font-size:18px;font-weight:650;line-height:1.35}
+.login-help{margin:0;font-size:13px;color:var(--dim);line-height:1.55}
+.login-err{margin:0;font-size:12.5px;color:var(--red);line-height:1.5}
+.brand{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:650;color:var(--dim);letter-spacing:.02em}
+.brand-dot{width:9px;height:9px;border-radius:50%;background:linear-gradient(135deg,var(--violet),var(--cyan))}
+.google-btn{display:flex;align-items:center;justify-content:center;gap:10px;height:40px;border-radius:10px;
+  background:#fff;color:#1f1f1f;font-weight:600;font-size:13.5px;text-decoration:none;transition:.12s}
+.google-btn:hover{background:#ececec}
+.dev-form{display:flex;align-items:center;gap:8px;padding-top:12px;border-top:1px dashed var(--line2);
+  font-size:11.5px;color:var(--faint)}
+.dev-form input{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);border-radius:8px;
+  height:28px;padding:0 9px;outline:none;font-size:12px}
+.bead.big{width:52px;height:52px;font-size:17px;background:var(--c)}
+.bead.small{width:26px;height:26px;font-size:10px;background:var(--c)}
+
+/* ── rail footer: the account ────────────────────────────── */
+.side-bottom{display:flex;flex-direction:column;gap:4px}
+.account-btn{display:flex;align-items:center;gap:9px;width:100%;padding:6px 8px;border-radius:10px;
+  text-align:left;min-width:0}
+.account-btn:hover{background:var(--card)}
+.account-name{flex:1;min-width:0;font-size:13px;font-weight:550;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+#app.collapsed .account-name,#app.collapsed .account-btn .chev{display:none}
+#app.collapsed .account-btn{justify-content:center}
+.menu.up{top:auto;bottom:44px;left:0;right:auto;min-width:230px}
+.menu-head{padding:8px 9px 10px;border-bottom:1px solid var(--line);margin-bottom:4px}
+.menu-head b{display:block;font-size:13px;font-weight:600}
+.menu-head span{display:block;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis}
+.menu .danger-item{color:var(--red)}
 
 /* ── who is here, and through what ───────────────────────── */
 .people{display:flex;gap:4px;align-items:center;margin-right:4px}
 .person{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 8px 0 3px;
   border:1px solid var(--line);border-radius:14px;background:var(--card);cursor:default}
 .person.idle{opacity:.5}
-.p-bead{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;
+.p-bead{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;flex:none;
   font-size:9.5px;font-weight:700;background:var(--line2);color:var(--text)}
+.account-btn .p-bead{width:28px;height:28px;font-size:10.5px}
 .p-agent{font-size:11px;color:var(--dim)}
 @media (max-width:1100px){.p-agent{display:none}.person{padding:0 3px}}
+.gone-who{color:var(--faint);font-style:italic;font-weight:500}
 
 /* ── dialogs ─────────────────────────────────────────────── */
-form.sheet{margin:0}
+.sheet{max-height:calc(100vh - 40px);display:flex;flex-direction:column}
+.sheet-body{overflow-y:auto}
 .wide-sheet{width:min(640px,100%)}
-.checks{display:flex;flex-direction:column;gap:6px}
-.check{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--text);cursor:pointer}
-.check input{accent-color:var(--violet)}
+.sheet-text{margin:0;font-size:13.5px;color:var(--dim);line-height:1.6;white-space:pre-line}
+.sheet-note{margin:0;font-size:12px;color:var(--faint);line-height:1.5}
+.sheet-body .rubric{margin:8px 0 0}
 .link-steps{margin:0;font-size:13px;color:var(--dim);line-height:1.6;white-space:pre-line}
-#linkText{width:100%;min-height:230px;resize:vertical;background:var(--card);border:1px solid var(--line);
+.mono-area{width:100%;min-height:230px;resize:vertical;background:var(--card);border:1px solid var(--line);
   border-radius:9px;padding:11px 12px;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
   color:var(--text);outline:none}
-.link-note{margin:0;font-size:11.5px;color:var(--faint);line-height:1.5}
+.primary-btn.small{height:28px;font-size:12px;padding:0 11px}
+.danger-btn{background:none}
+.danger-text{color:var(--red)}
+.danger-text:hover{background:color-mix(in srgb,var(--red) 12%,transparent);color:var(--red)}
+.wide-btn{width:100%;justify-content:center;border:1px dashed var(--line2)}
 
-.empty-view{display:grid;place-items:center;color:var(--faint);font-size:14px}
-.whoami .ghost-btn{width:auto;flex:none}
+.rows{display:flex;flex-direction:column;gap:6px}
+.item-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);
+  border-radius:10px;padding:9px 11px}
+.item-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.item-main b{font-size:13px;font-weight:600}
+.item-sub{font-size:11.5px;color:var(--faint)}
+.person-main{flex-direction:row;align-items:center;gap:10px}
+.person-main > div{display:flex;flex-direction:column;gap:1px;min-width:0}
+.item-acts{display:flex;gap:4px;flex:none}
+.add-row{display:flex;gap:8px}
+.add-row input{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);border-radius:9px;
+  height:34px;padding:0 10px;outline:none}
+.settings-top{display:grid;grid-template-columns:1fr auto;gap:12px 14px;align-items:end}
+.settings-top .field:first-child{grid-column:1 / -1}
+
+.fresh-url{border:1px solid color-mix(in srgb,var(--green) 45%,transparent);
+  background:color-mix(in srgb,var(--green) 7%,transparent);border-radius:12px;padding:12px 13px;
+  display:flex;flex-direction:column;gap:9px}
+.fresh-url b{font-size:13px}
+.url-row{display:flex;gap:8px;align-items:center}
+.url-line{flex:1;min-width:0;display:block;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;
+  overflow-x:auto;white-space:nowrap}
+.item-main .url-line{padding:4px 7px}
+.warn-line{margin:0;font-size:12px;color:var(--amber);line-height:1.5}
+
+.empty-view{display:grid;place-items:center}
+.empty-card{display:flex;flex-direction:column;align-items:center;gap:14px;color:var(--faint);font-size:14px}
+.empty-card p{margin:0}
+
+/* ── the top bar on narrower screens: shed labels before anything overlaps ── */
+.ws{min-width:0;flex:0 1 auto}
+.topbar > *{flex-shrink:0}
+.topbar .ws{flex-shrink:1}
+@media (max-width:1180px){.meta{display:none}}
+@media (max-width:980px){#linkBtn span{display:none}#linkBtn{padding:0 9px}}
+@media (max-width:860px){.people{display:none}.seg button span{display:none}.seg button{padding:0 8px}}

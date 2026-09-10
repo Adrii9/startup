@@ -1,20 +1,24 @@
 """SQLite schema and connections.
 
 The `event` table is append-only: never UPDATE, never DELETE. It is the single
-source of truth. Every other table is a projection that could be rebuilt by
-replaying the log, which is why `section` holds no content of its own.
+source of truth for a project. The one exception is a project its owner deleted
+more than 30 days ago, which is purged whole -- see store.purge_deleted_projects.
 
-A `member` is a person, with one token whatever number of projects they are in.
-`membership` says which projects. Every event, section and cursor belongs to
-exactly one project, and nothing crosses between them.
+Two credentials, deliberately separate:
+
+  * a web session, for a person in a browser, created by signing in with Google
+  * a connection token, one per assistant, which goes inside the connector URL
+
+A leaked connector URL can therefore be revoked without signing anyone out,
+and it can never be used to manage an account.
 """
 
 from __future__ import annotations
 
 import os
-import secrets
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 
@@ -37,30 +41,71 @@ def _db_path() -> Path:
 
 DB_PATH = _db_path()
 
-DEFAULT_COLOUR = "#7dd3fc"
-
 SCHEMA = """
+-- A person, known by their Google account. Deleting an account keeps the row,
+-- stripped of everything identifying, so that entries they wrote in shared
+-- projects still have an author and other people's history does not break.
+CREATE TABLE IF NOT EXISTS account (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    google_sub TEXT UNIQUE,
+    email      TEXT,
+    name       TEXT NOT NULL,
+    picture    TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+-- A signed-in browser. Only the hash is stored, so a copy of the database is
+-- not a way into anyone's account.
+CREATE TABLE IF NOT EXISTS session (
+    id_hash    TEXT PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES account(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
+);
+
+-- One per assistant. The token goes in the connector URL; only its hash is
+-- kept, which is why it can be shown exactly once.
+CREATE TABLE IF NOT EXISTS connection (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id   INTEGER NOT NULL REFERENCES account(id),
+    label        TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    prefix       TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS workspace (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     slug       TEXT NOT NULL UNIQUE,
     title      TEXT NOT NULL,
     colour     TEXT NOT NULL DEFAULT '#7dd3fc',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- A person. One token each, whatever number of projects they are in.
-CREATE TABLE IF NOT EXISTS member (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL UNIQUE,
-    token      TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS membership (
-    member_id    INTEGER NOT NULL REFERENCES member(id),
+    account_id   INTEGER NOT NULL REFERENCES account(id),
     workspace_id INTEGER NOT NULL REFERENCES workspace(id),
+    role         TEXT NOT NULL DEFAULT 'member',
     joined_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (member_id, workspace_id)
+    PRIMARY KEY (account_id, workspace_id)
+);
+
+-- Invite links. Kept in plain text, unlike connection tokens: they expire in a
+-- week, grant membership of one project, and an owner needs to copy them again.
+CREATE TABLE IF NOT EXISTS invite (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id),
+    code         TEXT NOT NULL UNIQUE,
+    created_by   INTEGER NOT NULL REFERENCES account(id),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at   TEXT NOT NULL,
+    max_uses     INTEGER,
+    uses         INTEGER NOT NULL DEFAULT 0,
+    revoked_at   TEXT
 );
 
 -- THE LOG. Append-only. event.id is monotonic and doubles as the read cursor;
@@ -68,19 +113,20 @@ CREATE TABLE IF NOT EXISTS membership (
 CREATE TABLE IF NOT EXISTS event (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     workspace_id  INTEGER NOT NULL REFERENCES workspace(id),
-    seq           INTEGER,
-    member_id     INTEGER NOT NULL REFERENCES member(id),
+    seq           INTEGER NOT NULL,
+    account_id    INTEGER NOT NULL REFERENCES account(id),
     agent         TEXT NOT NULL DEFAULT 'unknown',
     kind          TEXT NOT NULL DEFAULT 'work',
     summary       TEXT NOT NULL,
-    details       TEXT,          -- the body; summary is only the headline
+    details       TEXT,
     intent        TEXT,
-    intent_source TEXT,          -- 'stated' | 'inferred' | NULL
-    rejected_json TEXT,          -- [{"option": ..., "reason": ...}] or NULL
-    refs_json     TEXT,          -- internal ids of earlier entries in this project
+    intent_source TEXT,
+    rejected_json TEXT,
+    refs_json     TEXT,
     section_id    INTEGER REFERENCES section(id),
     supersedes_id INTEGER REFERENCES event(id),
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (workspace_id, seq)
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_ws ON event(workspace_id, id);
@@ -115,136 +161,39 @@ CREATE TABLE IF NOT EXISTS artifact (
 
 -- Per person AND per project: catching up in one must never mark another read.
 CREATE TABLE IF NOT EXISTS cursor (
-    member_id     INTEGER NOT NULL REFERENCES member(id),
+    account_id    INTEGER NOT NULL REFERENCES account(id),
     workspace_id  INTEGER NOT NULL REFERENCES workspace(id),
     last_event_id INTEGER NOT NULL DEFAULT 0,
     last_sync_at  TEXT,
-    PRIMARY KEY (member_id, workspace_id)
+    PRIMARY KEY (account_id, workspace_id)
 );
 """
 
-ROSTER = ["Adria", "Oscar", "Pau"]
 
+def _retire_old_database() -> None:
+    """Move a database from before accounts out of the way, without deleting it.
 
-def _seed_tokens() -> dict[str, str]:
-    """Tokens come from the environment, never from this file.
-
-    A token is the write key, so it does not belong in source control. Set
-    MEMBER_TOKENS as "Adria:xxx,Oscar:yyy,Pau:zzz"; with nothing set, each person
-    gets a random one on first boot, printed once at startup. Existing people
-    keep the token they already have, so restarts are safe.
+    The move to accounts started from zero on purpose. The old file is renamed
+    beside the new one rather than dropped, so it is still there if anyone ever
+    wants something out of it. WAL and SHM files move with it, or the copy
+    would be missing whatever had not been checkpointed yet.
     """
-    raw = os.environ.get("MEMBER_TOKENS", "").strip()
-    tokens = {}
-    for part in raw.split(","):
-        name, _, token = part.partition(":")
-        if name.strip() and token.strip():
-            tokens[name.strip()] = token.strip()
-    return tokens
-
-
-def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def _has_table(conn: sqlite3.Connection, name: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
-    ).fetchone() is not None
-
-
-def _migrate_to_projects() -> None:
-    """Turn a one-project database into a many-project one, keeping its data.
-
-    Before projects, each member row belonged to a single workspace and each
-    person had a single cursor. Now a member is a person, membership says which
-    projects, and the cursor is per project. SQLite cannot drop a column or
-    change a primary key in place, so both tables are rebuilt and copied across,
-    which is the documented procedure -- with foreign keys off, since the rows
-    they point at are being swapped underneath them.
-    """
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
+    if not DB_PATH.exists():
+        return
+    conn = sqlite3.connect(DB_PATH)
     try:
-        if not _has_table(conn, "member") or "workspace_id" not in _columns(conn, "member"):
-            return
-        # Must be set outside a transaction, or SQLite ignores it silently.
-        conn.execute("PRAGMA foreign_keys=OFF")
-        conn.execute("BEGIN")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS membership (
-                   member_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL,
-                   joined_at TEXT NOT NULL DEFAULT (datetime('now')),
-                   PRIMARY KEY (member_id, workspace_id))"""
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO membership (member_id, workspace_id) "
-            "SELECT id, workspace_id FROM member"
-        )
-
-        conn.execute(
-            """CREATE TABLE cursor_new (
-                   member_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL,
-                   last_event_id INTEGER NOT NULL DEFAULT 0, last_sync_at TEXT,
-                   PRIMARY KEY (member_id, workspace_id))"""
-        )
-        if _has_table(conn, "cursor"):
-            conn.execute(
-                "INSERT INTO cursor_new (member_id, workspace_id, last_event_id, last_sync_at) "
-                "SELECT c.member_id, m.workspace_id, c.last_event_id, c.last_sync_at "
-                "FROM cursor c JOIN member m ON m.id = c.member_id"
-            )
-            conn.execute("DROP TABLE cursor")
-        conn.execute("ALTER TABLE cursor_new RENAME TO cursor")
-
-        conn.execute(
-            """CREATE TABLE member_new (
-                   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
-                   token TEXT NOT NULL UNIQUE,
-                   created_at TEXT NOT NULL DEFAULT (datetime('now')))"""
-        )
-        conn.execute(
-            "INSERT INTO member_new (id, name, token, created_at) "
-            "SELECT id, name, token, created_at FROM member"
-        )
-        conn.execute("DROP TABLE member")
-        conn.execute("ALTER TABLE member_new RENAME TO member")
-        conn.execute("COMMIT")
-        print("migrated: members are now people, with a membership per project", flush=True)
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
-        conn.execute("PRAGMA foreign_keys=ON")
         conn.close()
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns to a database that predates them.
-
-    CREATE TABLE IF NOT EXISTS silently skips an existing table, so a schema
-    change would never reach a live workspace without this.
-    """
-    have = _columns(conn, "event")
-    for column, ddl in [("details", "TEXT"), ("refs_json", "TEXT"), ("seq", "INTEGER")]:
-        if column not in have:
-            conn.execute(f"ALTER TABLE event ADD COLUMN {column} {ddl}")
-            print(f"migrated: event.{column} added", flush=True)
-
-    # Number any entry that predates per-project numbering, in the order it was
-    # written. Idempotent: only rows still missing a number are touched.
-    conn.execute(
-        """UPDATE event SET seq = (
-               SELECT COUNT(*) FROM event e2
-               WHERE e2.workspace_id = event.workspace_id AND e2.id <= event.id)
-           WHERE seq IS NULL"""
-    )
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_event_seq ON event(workspace_id, seq)")
-
-    if "colour" not in _columns(conn, "workspace"):
-        conn.execute(
-            f"ALTER TABLE workspace ADD COLUMN colour TEXT NOT NULL DEFAULT '{DEFAULT_COLOUR}'"
-        )
+    if not tables or "account" in tables:
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for suffix in ("", "-wal", "-shm"):
+        src = Path(f"{DB_PATH}{suffix}")
+        if src.exists():
+            src.rename(Path(f"{DB_PATH}.before-accounts-{stamp}{suffix}"))
+    print(f"retired a database from before accounts to {DB_PATH}.before-accounts-{stamp}",
+          flush=True)
 
 
 @contextmanager
@@ -263,8 +212,8 @@ def connect():
         conn.close()
 
 
-def init_db(title: str = "Shared workspace") -> None:
-    """Create the schema, migrate an older one, and seed the people. Idempotent."""
+def init_db() -> None:
+    """Create the schema. Idempotent. Nobody is seeded: people sign themselves up."""
     # SQLite will not create the directory for us, and a host's mounted volume
     # may hand us an empty path. Crashing on a missing folder helps nobody.
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -284,57 +233,6 @@ def init_db(title: str = "Shared workspace") -> None:
             flush=True,
         )
 
-    if DB_PATH.exists():
-        _migrate_to_projects()
-
+    _retire_old_database()
     with connect() as conn:
         conn.executescript(SCHEMA)
-        _migrate(conn)
-
-        row = conn.execute("SELECT id FROM workspace WHERE slug = 'demo'").fetchone()
-        if row is None:
-            demo_id = conn.execute(
-                "INSERT INTO workspace (slug, title) VALUES ('demo', ?)", (title,)
-            ).lastrowid
-        else:
-            demo_id = row["id"]
-
-        configured = _seed_tokens()
-        for name in ROSTER:
-            # Keyed on name, not token: a person who already exists keeps their
-            # token, so a restart never mints a duplicate or breaks live URLs.
-            existing = conn.execute(
-                "SELECT id, token FROM member WHERE name = ?", (name,)
-            ).fetchone()
-            if existing is None:
-                member_id = conn.execute(
-                    "INSERT INTO member (name, token) VALUES (?, ?)",
-                    (name, configured.get(name) or secrets.token_urlsafe(12)),
-                ).lastrowid
-            else:
-                member_id = existing["id"]
-                if configured.get(name) and configured[name] != existing["token"]:
-                    # MEMBER_TOKENS is authoritative when set, so a leaked token
-                    # can be rotated without destroying anything to do it.
-                    conn.execute(
-                        "UPDATE member SET token = ? WHERE id = ?", (configured[name], member_id)
-                    )
-                    print(f"rotated token for {name}", flush=True)
-            # Everyone on the roster starts in the default project. Projects made
-            # later have exactly the members their creator chose.
-            conn.execute(
-                "INSERT OR IGNORE INTO membership (member_id, workspace_id) VALUES (?, ?)",
-                (member_id, demo_id),
-            )
-
-        # Printing a token puts it in the deploy log, in screen shares and in
-        # screenshots. Only do it when we minted it ourselves and nobody could
-        # otherwise know it; when tokens are configured, the operator has them.
-        people = conn.execute("SELECT name, token FROM member ORDER BY id").fetchall()
-        if configured:
-            print(f"People: {', '.join(p['name'] for p in people)} (tokens from MEMBER_TOKENS)",
-                  flush=True)
-        else:
-            print("Connector URLs -- append these paths to your public host:", flush=True)
-            for p in people:
-                print(f"  {p['name']:<8} /u/{p['token']}/mcp", flush=True)

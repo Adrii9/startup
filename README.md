@@ -1,61 +1,107 @@
-# shared-context — M0
+# shared-context
 
-One workspace that three people's AI assistants write into and read from, so
-nobody has to paste screenshots between chats.
-
-**M0 proves one thing only: the write/read loop closes.** Someone records work
-through their own assistant; everyone else's assistant learns about it the next
-time it touches the workspace for any reason.
+Shared projects that several people's AI assistants write into and read from,
+so nobody has to paste screenshots between chats. What travels between them is
+not files but the reasoning: what was decided, what was wanted, and what was
+tried and dropped — the part that is lost when a conversation ends.
 
 ## Run it
 
 ```bash
-uv run uvicorn app.server:app --port 8765 --reload
+DEV_LOGIN=1 uv run uvicorn app.server:app --port 8765 --reload
 ```
 
-Then open <http://127.0.0.1:8765/> — the document and the log, readable with no
-AI connected at all. That is deliberate: a new teammate should see the project
-moving before being asked to configure anything.
+Open <http://127.0.0.1:8765/>. Without Google credentials you can still sign in
+locally with the development form — see [Signing in](#signing-in).
 
 ```bash
 uv run pytest
 ```
 
-Eight tests cover the loop end to end without any assistant. Keep debugging
-here — opening three chat windows is for validating the magic moment, not for
+The suite covers accounts, connections, projects, invites, deletion and the
+write/read loop, with neither an assistant nor Google involved. Keep debugging
+here: opening three chat windows is for validating the magic moment, not for
 chasing a `NULL`.
 
 ## Shape
 
 ```
-app/db.py            schema + connection. The event table is append-only and is
-                     the only source of truth; every other table is a projection.
-app/store.py         the two operations, and derive_level. No MCP or HTTP import.
-app/render.py        the envelope: what an assistant actually reads.
-app/server.py        wrappers over the same functions — MCP, plain HTTP, the page.
-app/static/          the reader's view: board, graph, detail panel, CA/ES/EN.
+app/db.py        schema. The event log is append-only and is the source of truth.
+app/store.py     everything the product does. No MCP, HTTP or browser code in it.
+app/auth.py      signing in with Google.
+app/linking.py   the text that links a conversation to a project.
+app/render.py    what an assistant actually reads back from a tool call.
+app/server.py    three surfaces over store.py: MCP, plain HTTP, and the web.
+app/static/      the web: board, graph, detail panel, account and project admin.
 ```
 
-## What an entry counts as
+## Two credentials, never interchangeable
 
-`derive_level` decides, and the writer does not. Declaration sets the category
-where one was given — a fact answering a question stays a fact — and structure
-**promotes** work that turned out to be more than work: a dropped option or a
-superseded entry makes it a decision whether or not the model thought to say so.
-Structure never demotes.
+| | For | How you get it | What it can do |
+|---|---|---|---|
+| **Session** | a person in a browser | signing in with Google | manage your account and projects |
+| **Connection** | one assistant | Account → Connections, in the web | read and write the projects you are in |
 
-Within plain work an artifact outranks a dropped option, so producing a file
-with a choice along the way stays history instead of crowding the brief.
+A connection token lives inside a connector URL, gets pasted into assistant
+settings, and ends up in screenshots. So it is only ever a write key for the
+projects you are in: it cannot sign in to the web or manage anything, and you
+can revoke one without touching your session or your other assistants.
 
-The point is that a model cannot inflate the importance of its own entry, and
-three different models cannot drift apart on what counts as a decision, because
-none of them is being asked to judge. The detail panel in the web view says out
-loud which field a level came from, and whether that level survives into the
-brief — the rules are meant to be auditable, not magic.
+Only hashes are stored, for both. A connection is shown exactly once, when it is
+made; a copy of the database is not a way into anyone's account.
 
-The dual wrapper is not belt-and-braces. Claude and ChatGPT speak MCP; Gemini's
-consumer app is US-only for custom MCP servers, so Oscar comes in through
-`/api/*` or Gemini CLI. MCP is a convenience here, never a requirement.
+## Signing in
+
+With Google, via the server-side authorization code flow in `app/auth.py`. No
+passwords are stored and account recovery is Google's job. An account is keyed
+on Google's `sub`, not on the email address, which can change hands.
+
+Set in production:
+
+| Variable | Value |
+|---|---|
+| `GOOGLE_CLIENT_ID` | from the OAuth client in Google Cloud |
+| `GOOGLE_CLIENT_SECRET` | same |
+| `PUBLIC_URL` | `https://<your host>` — Google checks the redirect URI against it exactly |
+
+The redirect URI to register at Google is `<PUBLIC_URL>/auth/google/callback`.
+
+For local work, `DEV_LOGIN=1` enables a sign-in form that takes just a name. It
+has two locks, and both must hold: the variable is set, **and** the connection
+itself comes from a loopback address. Behind any proxy the peer is never
+loopback, so setting the variable on a public server still cannot open it.
+
+## Projects, roles and invites
+
+A project has one **owner** and any number of **members**. The owner renames,
+invites, removes people, hands over ownership and deletes; a member reads,
+writes through their assistant, and can leave. A project is never left without
+an owner: to leave, the owner hands it to someone first.
+
+People join through **invite links** — `/join/<code>`, sent however you like,
+valid for 7 days, revocable. Whoever opens one signs in with Google and is in.
+There is deliberately no list of everyone to pick from: at any size beyond a
+group of friends, that list is itself a leak.
+
+A project someone is not in behaves exactly like one that does not exist, in the
+tools and in the web, so nobody learns which projects exist by probing.
+
+## Removing and deleting
+
+**Removing someone does not remove what they wrote.** Their entries are the
+project's history and other people's decisions build on them. They lose access
+immediately — including a page they have open, which is told to leave — and
+their entries stay under their name.
+
+**Deleting a project** puts it in the owner's trash for 30 days, restorable,
+then purges it whole. That purge is the one place anything in a log is ever
+deleted: append-only means history is not rewritten, not that nobody may delete
+their own project.
+
+**Deleting an account** is refused while it owns projects other people are in —
+those have to be handed over or deleted first, rather than silently orphaned.
+Projects only that person was in go with them. Everywhere else they leave, and
+what they wrote stays, attributed to an anonymous former member.
 
 ## History, and what is true now
 
@@ -67,114 +113,73 @@ So `catch_up` leads with **the brief** — every entry not yet superseded, group
 into decisions in force, what the team knows, and what is still open. It is
 computed from the log on every read and never written. Each item collapses to
 **one line**, because its job is to be an index that fits in every assistant's
-context however long the project runs; the body stays in the log for whoever
-needs it. If this ever stops fitting on a screen, it has stopped working.
-
-A decision keeps its reason in the brief. A decision without its reason gets
-quietly re-litigated.
+context however long the project runs.
 
 `supersedes` carries three meanings with one pointer: a decision reversed, a
 question answered, a fact corrected. Anything superseded drops out of the brief.
 
-## Projects
+## What an entry counts as
 
-A person has one token and can be in many projects. Everything — entries,
-sections, the read cursor — belongs to exactly one project, and nothing crosses
-between them: entry numbers count from #1 in each project, and a `supersedes` or
-`refs` pointing at another project's entry simply does not resolve.
+`derive_level` decides, not the writer. Declaration sets the category where one
+was given — a fact answering a question stays a fact — and structure
+**promotes** work that turned out to be more than work: a dropped option or a
+superseded entry makes it a decision whether or not the model said so. Structure
+never demotes. Within plain work an artifact outranks a dropped option, so
+producing a file with a choice along the way stays out of the brief.
 
-A project someone is not in behaves exactly like one that does not exist, both
-in the tools and in the web, so nobody learns which projects are taken by
-probing for them.
-
-## The web
-
-Sign in by pasting your connector URL (or just the token). It is kept in an
-HttpOnly cookie, out of reach of page scripts. Nothing about any project is
-served until you are signed in, and then only the projects you are in.
-
-From the web you create projects, choose who is in them, and generate the text
-that links a conversation to one — see [LINKING.md](LINKING.md).
-
-The strip at the top shows who is in the project and which assistant each last
-wrote with. That is what the web can honestly know: it cannot see anyone's
-conversations, so it does not offer to pick one.
+The point is that a model cannot inflate its own entry, and three different
+models cannot drift apart on what a decision is, because none of them is judging.
+The detail panel in the web says which field a level came from, and whether it
+survives into the brief.
 
 ## The two tools
 
 - `catch_up(project)` — the brief, the document, then everything since your cursor.
 - `record(project, summary, details, kind, intent, rejected, refs, section, content, artifact, supersedes)`
 
-`project` is required on both. An unknown or missing one is refused with the
-list of projects the caller is in.
+`project` is required on both; an unknown or missing one is refused with the
+list of projects the caller is in. Entry numbers count from #1 in each project,
+and a `supersedes` or `refs` pointing into another project does not resolve.
 
-`kind` is one of `decision`, `fact`, `question`, `work`. The first three stay in
-the brief; `work` scrolls away into history. When a model omits it, it is
-inferred rather than rejected — a wrong guess is recoverable, a failed tool call
-in the middle of someone's work is not.
-
-`summary` is the headline; `details` is the substance. See [LINKING.md](LINKING.md)
-for the instructions that make an assistant do this without being asked.
-
-`intent` and `rejected` are first-class parameters of the only write tool, so a
-model cannot skip them without seeing them. Their descriptions explicitly
-authorise leaving them blank, which is what stops a model inventing a rationale
-nobody gave — an invented reason is worse than none, because the other two
-assistants read it as fact.
+`intent` and `rejected` are first-class parameters of the only write tool, and
+their descriptions explicitly allow leaving them blank — which is what stops a
+model inventing a reason nobody gave.
 
 **Every response carries the delta.** You cannot push to an LLM, so the news
 rides along with whatever the assistant was already doing.
 
 ## Connecting an assistant
 
-Each person has their own URL. The token is a path segment, which survives
-proxies and client-side URL rewriting better than a query string:
+1. In the web: **Account → Connections → Create connection**, name it, copy the URL.
+2. Add it to your assistant as a custom connector.
+3. For each project, **Link a conversation** gives the instructions to paste into
+   a Project in your assistant — see [LINKING.md](LINKING.md).
 
-```
-https://<host>/u/<token>/mcp
-```
-
-**Tokens never live in this repo.** Set `MEMBER_TOKENS` in the environment as
-`Adria:xxx,Oscar:yyy,Pau:zzz`, or set nothing and let the server mint random
-ones on first boot — it prints all three paths to the log at startup. Members
-keep their token across restarts, so a redeploy never invalidates a connector
-someone has already configured.
+| | Where the URL goes |
+|---|---|
+| Claude | Settings → Connectors → Add custom connector |
+| ChatGPT | Developer mode, then add it as a custom connector |
+| Gemini | Gemini CLI settings (the consumer app's custom MCP is US-only), or `/api/*` |
 
 > **`localhost` will not work.** Claude's connectors reach your server from
-> Anthropic's cloud, not from your laptop. Deploy to a public HTTPS host from
-> day one and always work against that URL — a tunnel with a rotating address
-> means reconfiguring three connectors every morning.
+> Anthropic's cloud, not from your laptop. Always use the public HTTPS URL.
 
-| | Where |
-|---|---|
-| Claude | Settings → Connectors → Add custom connector → paste the URL |
-| ChatGPT | Enable developer mode, then add the URL as a custom connector |
-| Gemini | Gemini CLI (the consumer app's custom-MCP feature is US-only), or `/api/*` |
-
-For anything that does not speak MCP:
+For anything that does not speak MCP, the same operations over plain HTTP:
 
 ```bash
-curl -X POST https://<host>/u/<token>/api/record \
+curl -X POST https://<host>/u/<connection token>/api/record \
   -H 'content-type: application/json' \
-  -d '{"summary":"generated the cover","intent":"minimalist","artifact":"cover.png"}'
+  -d '{"project":"tfg","summary":"generated the cover","artifact":"cover.png"}'
 ```
 
-A token is the whole of the auth story right now. That is fine for three people
-who know each other, and stops being fine the moment a workspace is shared with
-anyone else — at which point this becomes OAuth.
+## Not built yet
 
-## What M0 deliberately does not have
+**OAuth for MCP**, so a connector URL carries no secret at all and the assistant
+signs in through Google itself. The token-in-URL path stays either way, as the
+one that works with every client.
 
-No accounts, no OAuth, no permissions, no invitations, no live web updates, no
-conflict handling beyond last-write-wins, no knowledge graph, no search. One
-fixed workspace, three seeded members.
-
-Delete `workspace.db` to start over.
-
-## Next
-
-**M1** — connect all three assistants for real and do a whole piece of work
-this way. Do not build past this point until the three of you have seen the
-moment land: Oscar asks his Gemini for something, and Adrià's Claude knows about
-it without anyone pasting anything. If that does not impress you, nothing after
-it will.
+**Guarding against prompt injection between people.** The product is, by
+design, a channel for text one person's assistant wrote to enter another's
+context. Among friends that is fine; once projects hold people you do not fully
+trust, it is a real attack surface. The web marks every entry as data, never
+instructions — the assistants do not yet.

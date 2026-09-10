@@ -5,17 +5,20 @@ Three surfaces over the same functions in store.py:
   * an MCP server, for Claude and ChatGPT, which speak it natively
   * a plain HTTP/JSON pair of endpoints, for anything that does not -- Gemini
     through its API, a local model, whatever comes next
-  * the web view, for people, signed in with the same token their assistant uses
+  * the web, for people, signed in with Google
 
-MCP is a convenience here, never a requirement, which is what keeps a
-platform's connector policy from deciding whether a teammate can join.
+The first two authenticate with a connection token from the connector URL. The
+web authenticates with a session. The two never stand in for each other.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import os
 import re
+import secrets
 from pathlib import Path
 from typing import Annotated
 
@@ -27,16 +30,17 @@ from starlette.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
+    RedirectResponse,
     Response,
     StreamingResponse,
 )
 
-from . import db, linking, render, store
+from . import auth, db, linking, render, store
 
 mcp = FastMCP("shared-context")
 
 
-# --- who is calling ----------------------------------------------------------
+# --- who is calling, from a connector ----------------------------------------------
 
 
 def _request() -> Request | None:
@@ -93,49 +97,43 @@ def _agent() -> str:
 
 
 UNKNOWN_TOKEN = (
-    "This connector is not recognised by the workspace. Its URL should end in "
-    "/u/<your token>/mcp -- check it against the one you were given, and note "
-    "that tokens change if the workspace is reset."
+    "This connector is not recognised. It may have been revoked, or the URL may be "
+    "mistyped. Create a new connection in the web (Account → Connections) and put "
+    "its URL in your assistant."
 )
 
 
-def _member(conn):
-    """No fallback. An unrecognised token must fail, not quietly become someone.
-
-    M0 let a tokenless call act as the first member so the loop could be tested
-    with one assistant. Kept any longer, that turns a mistyped connector URL
-    into entries silently attributed to the wrong person.
-    """
-    member = store.resolve_member(conn, _token())
-    if member is None:
+def _account(conn):
+    """No fallback. An unrecognised or revoked token must fail, not become someone."""
+    account = store.account_for_token(conn, _token())
+    if account is None:
         raise ToolError(UNKNOWN_TOKEN)
-    return member
+    return account
 
 
-def _unknown_project(conn, member, slug: str) -> str:
+def _unknown_project(conn, account, slug: str) -> str:
     """Never guess which project a call meant. Say which ones it could have.
 
     Writing to the wrong project is the same failure as writing under the wrong
     name, so it gets the same treatment: refuse, and make recovery one step.
     """
-    options = ", ".join(
-        f'"{p["slug"]}" ({p["title"]})' for p in store.projects_for(conn, member["id"])
-    )
-    said = f'"{slug}" is not a project {member["name"]} is in. ' if slug else "No project given. "
+    projects = store.projects_for(conn, account["id"])
+    options = ", ".join(f'"{p["slug"]}" ({p["title"]})' for p in projects) or "none yet"
+    said = f'"{slug}" is not a project {account["name"]} is in. ' if slug else "No project given. "
     return (
         f"{said}Pass one of these as project=: {options}. It should be in the "
         "instructions of the conversation you are working in."
     )
 
 
-def _project(conn, member, slug: str):
-    ws = store.resolve_project(conn, member["id"], slug)
+def _project(conn, account, slug: str):
+    ws = store.resolve_project(conn, account["id"], slug)
     if ws is None:
-        raise ToolError(_unknown_project(conn, member, slug))
+        raise ToolError(_unknown_project(conn, account, slug))
     return ws
 
 
-# --- the two tools -----------------------------------------------------------
+# --- the two tools -----------------------------------------------------------------
 
 ProjectArg = Annotated[
     str,
@@ -160,8 +158,8 @@ def catch_up(project: ProjectArg) -> str:
     working here with their own AI assistants, so this changes often.
     """
     with db.connect() as conn:
-        member = _member(conn)
-        return render.render(store.catch_up(conn, member, _project(conn, member, project)))
+        account = _account(conn)
+        return render.render(store.catch_up(conn, account, _project(conn, account, project)))
 
 
 @mcp.tool
@@ -262,11 +260,11 @@ def record(
     Returns confirmation plus anything teammates did in the meantime.
     """
     with db.connect() as conn:
-        member = _member(conn)
+        account = _account(conn)
         env = store.record(
             conn,
-            member,
-            _project(conn, member, project),
+            account,
+            _project(conn, account, project),
             agent=_agent(),
             summary=summary,
             details=details,
@@ -282,11 +280,11 @@ def record(
         return render.render(env)
 
 
-# --- the same thing over plain HTTP, for clients that do not speak MCP --------
+# --- the same thing over plain HTTP, for clients that do not speak MCP --------------
 
 
-def _http_member(conn, request: Request):
-    return store.resolve_member(
+def _http_account(conn, request: Request):
+    return store.account_for_token(
         conn, request.query_params.get("k") or request.headers.get("x-member-token")
     )
 
@@ -294,30 +292,30 @@ def _http_member(conn, request: Request):
 @mcp.custom_route("/api/catch_up", methods=["GET", "POST"])
 async def api_catch_up(request: Request) -> JSONResponse:
     with db.connect() as conn:
-        member = _http_member(conn, request)
-        if member is None:
+        account = _http_account(conn, request)
+        if account is None:
             return JSONResponse({"error": UNKNOWN_TOKEN}, status_code=403)
         slug = request.query_params.get("project", "")
-        ws = store.resolve_project(conn, member["id"], slug)
+        ws = store.resolve_project(conn, account["id"], slug)
         if ws is None:
-            return JSONResponse({"error": _unknown_project(conn, member, slug)}, status_code=400)
-        return JSONResponse({"text": render.render(store.catch_up(conn, member, ws))})
+            return JSONResponse({"error": _unknown_project(conn, account, slug)}, status_code=400)
+        return JSONResponse({"text": render.render(store.catch_up(conn, account, ws))})
 
 
 @mcp.custom_route("/api/record", methods=["POST"])
 async def api_record(request: Request) -> JSONResponse:
     payload = await request.json()
     with db.connect() as conn:
-        member = _http_member(conn, request)
-        if member is None:
+        account = _http_account(conn, request)
+        if account is None:
             return JSONResponse({"error": UNKNOWN_TOKEN}, status_code=403)
         slug = payload.get("project") or request.query_params.get("project", "")
-        ws = store.resolve_project(conn, member["id"], slug)
+        ws = store.resolve_project(conn, account["id"], slug)
         if ws is None:
-            return JSONResponse({"error": _unknown_project(conn, member, slug)}, status_code=400)
+            return JSONResponse({"error": _unknown_project(conn, account, slug)}, status_code=400)
         env = store.record(
             conn,
-            member,
+            account,
             ws,
             agent=payload.get("agent", "http"),
             summary=payload["summary"],
@@ -334,122 +332,377 @@ async def api_record(request: Request) -> JSONResponse:
         return JSONResponse({"text": render.render(env)})
 
 
-# --- the web: signed in with the same token the assistant uses ----------------
+# --- signing in -----------------------------------------------------------------------
 
-COOKIE = "sc_token"
-NOT_SIGNED_IN = JSONResponse({"error": "not signed in"}, status_code=401)
-
-
-def _web_member(conn, request: Request):
-    return store.resolve_member(conn, request.cookies.get(COOKIE))
+SESSION = "sc_session"
+OAUTH = "sc_oauth"
 
 
 def _is_local(request: Request) -> bool:
-    host = request.headers.get("host", "")
-    return host.startswith(("127.0.0.1", "localhost"))
+    return request.headers.get("host", "").startswith(("127.0.0.1", "localhost"))
 
 
-@mcp.custom_route("/api/login", methods=["POST"])
-async def api_login(request: Request) -> JSONResponse:
-    """Sign in with a token, or with the whole connector URL.
+def _loopback_peer(request: Request) -> bool:
+    """Whether the connection itself comes from this machine.
 
-    People have the connector URL, not the bare token -- that is what they were
-    given and what they pasted into their assistant -- so accept either.
-
-    The token goes into an HttpOnly cookie: page scripts never see it, so a
-    script that got onto the page could not read it and send it elsewhere.
+    The peer address, not the Host header: a header is whatever the client says
+    it is, whereas behind Railway's proxy the peer is never a loopback address.
     """
-    payload = await request.json()
-    raw = (payload.get("token") or "").strip()
-    match = re.search(r"/u/([A-Za-z0-9_.-]+)", raw)
-    token = match.group(1) if match else raw
+    try:
+        return ipaddress.ip_address(request.client.host).is_loopback
+    except (ValueError, AttributeError):
+        return False
+
+
+def _dev_login_allowed(request: Request) -> bool:
+    """A sign-in without Google, for working on this locally. Two locks, both
+    required: the variable is set, and the request physically comes from this
+    machine. Setting DEV_LOGIN on a public server still cannot open it."""
+    return os.environ.get("DEV_LOGIN") == "1" and _loopback_peer(request)
+
+
+def _start_session(conn, request: Request, account_id: int, to: str) -> RedirectResponse:
+    raw = store.create_session(conn, account_id)
+    resp = RedirectResponse(to, status_code=303)
+    resp.set_cookie(SESSION, raw, max_age=60 * 60 * 24 * store.SESSION_DAYS, path="/",
+                    httponly=True, samesite="lax", secure=not _is_local(request))
+    resp.delete_cookie(OAUTH, path="/")
+    return resp
+
+
+@mcp.custom_route("/api/config", methods=["GET"])
+async def api_config(request: Request) -> JSONResponse:
+    return JSONResponse({"google": auth.configured(), "dev": _dev_login_allowed(request)})
+
+
+@mcp.custom_route("/auth/google", methods=["GET"])
+async def auth_google(request: Request) -> Response:
+    if not auth.configured():
+        return PlainTextResponse(
+            "Google sign-in is not configured on this server yet: set GOOGLE_CLIENT_ID "
+            "and GOOGLE_CLIENT_SECRET.", status_code=503)
+    state = secrets.token_urlsafe(24)
+    nxt = auth.safe_next(request.query_params.get("next"))
+    resp = RedirectResponse(auth.authorize_url(request, state), status_code=303)
+    # The state goes out to Google in the URL and must come back matching this
+    # cookie, which a third-party site cannot set: that is what stops someone
+    # signing a victim into the attacker's own account.
+    resp.set_cookie(OAUTH, f"{state}|{nxt}", max_age=600, path="/",
+                    httponly=True, samesite="lax", secure=not _is_local(request))
+    return resp
+
+
+@mcp.custom_route("/auth/google/callback", methods=["GET"])
+async def auth_google_callback(request: Request) -> Response:
+    stored = request.cookies.get(OAUTH, "")
+    state, _, nxt = stored.partition("|")
+    got = request.query_params.get("state", "")
+    if not state or not secrets.compare_digest(state, got):
+        return PlainTextResponse("Sign-in expired or was interrupted. Please try again.",
+                                 status_code=400)
+    code = request.query_params.get("code")
+    if not code:
+        return RedirectResponse("/", status_code=303)
+    try:
+        who = await auth.identity(request, code)
+    except Exception as e:
+        print(f"google sign-in failed: {e!r}", flush=True)
+        return PlainTextResponse("Google did not confirm the sign-in. Please try again.",
+                                 status_code=502)
+    if not who.get("email_verified"):
+        return PlainTextResponse("That Google account has no verified email address.",
+                                 status_code=403)
     with db.connect() as conn:
-        member = store.resolve_member(conn, token)
-    if member is None:
-        return JSONResponse({"error": "That token does not match anyone."}, status_code=401)
-    resp = JSONResponse({"name": member["name"]})
-    resp.set_cookie(
-        COOKIE, token, max_age=60 * 60 * 24 * 90, path="/",
-        httponly=True, samesite="lax", secure=not _is_local(request),
-    )
-    return resp
+        account = store.account_from_google(conn, who["sub"], who["email"],
+                                            who.get("name", ""), who.get("picture", ""))
+        return _start_session(conn, request, account["id"], auth.safe_next(nxt))
 
 
-@mcp.custom_route("/api/logout", methods=["POST"])
-async def api_logout(request: Request) -> JSONResponse:
+@mcp.custom_route("/auth/dev", methods=["POST"])
+async def auth_dev(request: Request) -> Response:
+    if not _dev_login_allowed(request):
+        return PlainTextResponse("not found", status_code=404)
+    form = await request.form()
+    name = (form.get("name") or "Dev").strip()
+    with db.connect() as conn:
+        account = store.account_from_google(conn, f"dev:{name.lower()}",
+                                            f"{name.lower()}@dev.local", name)
+        return _start_session(conn, request, account["id"],
+                              auth.safe_next(form.get("next")))
+
+
+@mcp.custom_route("/auth/logout", methods=["POST"])
+async def auth_logout(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        store.end_session(conn, request.cookies.get(SESSION))
     resp = JSONResponse({"ok": True})
-    resp.delete_cookie(COOKIE, path="/")
+    resp.delete_cookie(SESSION, path="/")
     return resp
+
+
+# --- the web's API -------------------------------------------------------------------
+
+NOT_SIGNED_IN = {"error": "not signed in"}
+
+
+def _web_account(conn, request: Request):
+    return store.account_for_session(conn, request.cookies.get(SESSION))
+
+
+def _err(msg: str, status: int = 400) -> JSONResponse:
+    return JSONResponse({"error": msg}, status_code=status)
+
+
+async def _body(request: Request) -> dict:
+    try:
+        data = await request.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 @mcp.custom_route("/api/me", methods=["GET"])
 async def api_me(request: Request) -> JSONResponse:
     with db.connect() as conn:
-        member = _web_member(conn, request)
-        if member is None:
-            return NOT_SIGNED_IN
+        store.purge_deleted_projects(conn)
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
         projects = [
             {
-                "slug": p["slug"],
-                "title": p["title"],
-                "colour": p["colour"],
+                "slug": p["slug"], "title": p["title"], "colour": p["colour"], "role": p["role"],
                 "members": [m["name"] for m in store.members_of(conn, p["id"])],
-                "unread": store.unread_for(conn, member["id"], p["id"]),
+                "unread": store.unread_for(conn, account["id"], p["id"]),
             }
-            for p in store.projects_for(conn, member["id"])
+            for p in store.projects_for(conn, account["id"])
         ]
-        return JSONResponse(
-            {"name": member["name"], "people": store.everyone(conn), "projects": projects,
-             "palette": list(store.PALETTE)}
-        )
+        return JSONResponse({
+            "account": {"id": account["id"], "name": account["name"],
+                        "email": account["email"], "picture": account["picture"]},
+            "projects": projects,
+            "palette": list(store.PALETTE),
+        })
 
+
+@mcp.custom_route("/api/account", methods=["DELETE"])
+async def api_delete_account(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            store.delete_account(conn, account["id"])
+        except store.Refused as e:
+            return _err(str(e), 409)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(SESSION, path="/")
+    return resp
+
+
+# connections: the connector URLs, one per assistant
+
+@mcp.custom_route("/api/connections", methods=["GET", "POST"])
+async def api_connections(request: Request) -> JSONResponse:
+    body = await _body(request) if request.method == "POST" else {}
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        if request.method == "GET":
+            return JSONResponse({"connections": store.list_connections(conn, account["id"])})
+        row, raw = store.create_connection(conn, account["id"], body.get("label", ""))
+        # The only time the raw token ever leaves the server. It is not stored,
+        # so if this response is lost the connection has to be made again.
+        return JSONResponse({**row, "url": f"{auth.public_url(request)}/u/{raw}/mcp"})
+
+
+@mcp.custom_route("/api/connections/{cid:int}", methods=["DELETE"])
+async def api_revoke_connection(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        if not store.revoke_connection(conn, account["id"], request.path_params["cid"]):
+            return _err("No such connection.", 404)
+        return JSONResponse({"ok": True})
+
+
+# projects
 
 @mcp.custom_route("/api/projects", methods=["POST"])
 async def api_create_project(request: Request) -> JSONResponse:
-    payload = await request.json()
+    body = await _body(request)
     with db.connect() as conn:
-        member = _web_member(conn, request)
-        if member is None:
-            return NOT_SIGNED_IN
-        if not (payload.get("title") or "").strip():
-            return JSONResponse({"error": "A project needs a name."}, status_code=400)
-        ws = store.create_project(
-            conn, member["id"], payload["title"], payload.get("colour", ""),
-            [n for n in payload.get("members", []) if n != member["name"]],
-        )
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            ws = store.create_project(conn, account["id"], body.get("title", ""),
+                                      body.get("colour", ""))
+        except store.Refused as e:
+            return _err(str(e))
         return JSONResponse({"slug": ws["slug"], "title": ws["title"]})
 
 
-@mcp.custom_route("/api/projects/{slug}/members", methods=["POST"])
-async def api_add_member(request: Request) -> JSONResponse:
-    payload = await request.json()
+@mcp.custom_route("/api/projects/{slug}", methods=["PATCH", "DELETE"])
+async def api_project(request: Request) -> JSONResponse:
+    body = await _body(request) if request.method == "PATCH" else {}
+    slug = request.path_params["slug"]
     with db.connect() as conn:
-        member = _web_member(conn, request)
-        if member is None:
-            return NOT_SIGNED_IN
-        ws = store.resolve_project(conn, member["id"], request.path_params["slug"])
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            if request.method == "DELETE":
+                store.delete_project(conn, account["id"], slug)
+                return JSONResponse({"ok": True})
+            ws = store.update_project(conn, account["id"], slug,
+                                      body.get("title"), body.get("colour"))
+            return JSONResponse({"slug": ws["slug"], "title": ws["title"], "colour": ws["colour"]})
+        except store.Refused as e:
+            return _err(str(e), 403)
+
+
+@mcp.custom_route("/api/projects/{slug}/restore", methods=["POST"])
+async def api_restore(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            store.restore_project(conn, account["id"], request.path_params["slug"])
+        except store.Refused as e:
+            return _err(str(e), 404)
+        return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/trash", methods=["GET"])
+async def api_trash(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        return JSONResponse({"projects": store.trash_for(conn, account["id"])})
+
+
+@mcp.custom_route("/api/projects/{slug}/members", methods=["GET"])
+async def api_members(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        ws = store.resolve_project(conn, account["id"], request.path_params["slug"])
         if ws is None:
-            return JSONResponse({"error": "No such project."}, status_code=404)
-        if store.add_member(conn, ws["id"], payload.get("name", "")) is None:
-            return JSONResponse({"error": "Nobody by that name."}, status_code=404)
-        return JSONResponse({"members": [m["name"] for m in store.members_of(conn, ws["id"])]})
+            return _err("No such project.", 404)
+        return JSONResponse({"role": ws["role"], "you": account["id"],
+                             "members": store.members_of(conn, ws["id"])})
+
+
+@mcp.custom_route("/api/projects/{slug}/members/{aid:int}", methods=["DELETE"])
+async def api_remove_member(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            store.remove_member(conn, account["id"], request.path_params["slug"],
+                                request.path_params["aid"])
+        except store.Refused as e:
+            return _err(str(e), 403)
+        return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/projects/{slug}/owner", methods=["POST"])
+async def api_transfer(request: Request) -> JSONResponse:
+    body = await _body(request)
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            store.transfer_ownership(conn, account["id"], request.path_params["slug"],
+                                     int(body.get("account_id") or 0))
+        except store.Refused as e:
+            return _err(str(e), 403)
+        return JSONResponse({"ok": True})
+
+
+# invites
+
+@mcp.custom_route("/api/projects/{slug}/invites", methods=["GET", "POST"])
+async def api_invites(request: Request) -> JSONResponse:
+    body = await _body(request) if request.method == "POST" else {}
+    slug = request.path_params["slug"]
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            if request.method == "POST":
+                inv = store.create_invite(conn, account["id"], slug, body.get("max_uses"))
+                return JSONResponse({**inv, "url": f"{auth.public_url(request)}/join/{inv['code']}"})
+            invites = store.list_invites(conn, account["id"], slug)
+            base = auth.public_url(request)
+            return JSONResponse({"invites": [{**i, "url": f"{base}/join/{i['code']}"}
+                                             for i in invites]})
+        except store.Refused as e:
+            return _err(str(e), 403)
+
+
+@mcp.custom_route("/api/projects/{slug}/invites/{iid:int}", methods=["DELETE"])
+async def api_revoke_invite(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            store.revoke_invite(conn, account["id"], request.path_params["slug"],
+                                request.path_params["iid"])
+        except store.Refused as e:
+            return _err(str(e), 403)
+        return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/invites/{code}", methods=["GET"])
+async def api_invite_preview(request: Request) -> JSONResponse:
+    """Readable without signing in: the link itself is the permission to see
+    which project it is for and who sent it, and nothing more."""
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        info = store.preview_invite(conn, request.path_params["code"],
+                                    account["id"] if account else None)
+    if info is None:
+        return _err("This invite has expired or is no longer valid.", 404)
+    return JSONResponse({**info, "signed_in": account is not None})
+
+
+@mcp.custom_route("/api/invites/{code}/accept", methods=["POST"])
+async def api_invite_accept(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            slug = store.accept_invite(conn, account["id"], request.path_params["code"])
+        except store.Refused as e:
+            return _err(str(e), 404)
+        return JSONResponse({"slug": slug})
 
 
 @mcp.custom_route("/api/projects/{slug}/link", methods=["GET"])
 async def api_link(request: Request) -> JSONResponse:
     """The text that links a conversation to this project.
 
-    Deliberately does not include the person's connector URL or token: that is
-    set up once per person, not per project, and it has no business being
-    handed to a page script.
+    Deliberately does not include any connector URL: that is set up once per
+    assistant, under Connections, not once per project.
     """
     with db.connect() as conn:
-        member = _web_member(conn, request)
-        if member is None:
-            return NOT_SIGNED_IN
-        ws = store.resolve_project(conn, member["id"], request.path_params["slug"])
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        ws = store.resolve_project(conn, account["id"], request.path_params["slug"])
         if ws is None:
-            return JSONResponse({"error": "No such project."}, status_code=404)
+            return _err("No such project.", 404)
         lang = request.query_params.get("lang", "ca")
         return JSONResponse(
             {"slug": ws["slug"], "text": linking.instructions(ws["slug"], ws["title"], lang)}
@@ -459,34 +712,33 @@ async def api_link(request: Request) -> JSONResponse:
 @mcp.custom_route("/api/state", methods=["GET"])
 async def api_state(request: Request) -> JSONResponse:
     with db.connect() as conn:
-        member = _web_member(conn, request)
-        if member is None:
-            return NOT_SIGNED_IN
-        ws = store.resolve_project(conn, member["id"], request.query_params.get("project"))
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        ws = store.resolve_project(conn, account["id"], request.query_params.get("project"))
         if ws is None:
-            return JSONResponse({"error": "No such project."}, status_code=404)
-        return JSONResponse(store.snapshot(conn, ws["id"]))
+            return _err("No such project.", 404)
+        return JSONResponse({**store.snapshot(conn, ws["id"]), "role": ws["role"]})
 
 
 @mcp.custom_route("/events", methods=["GET"])
 async def events(request: Request) -> Response:
     """Server-sent events for one project, driven by polling its high-water mark.
 
-    Polling rather than an in-process broadcast on purpose: writes can arrive
-    from any worker, and comparing three integers every second and a half costs
-    nothing at this size. It also keeps store.py unaware that SSE exists.
-
-    Membership is checked before the stream opens: a page can only ever follow
-    a project its signed-in person is in.
+    Membership is checked when the stream opens and again on every tick, so
+    someone removed from a project, or signed out, stops receiving it at once
+    rather than whenever they next reload.
     """
+    raw = request.cookies.get(SESSION)
+    slug = request.query_params.get("project")
     with db.connect() as conn:
-        member = _web_member(conn, request)
-        if member is None:
-            return NOT_SIGNED_IN
-        ws = store.resolve_project(conn, member["id"], request.query_params.get("project"))
+        account = store.account_for_session(conn, raw)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        ws = store.resolve_project(conn, account["id"], slug)
         if ws is None:
-            return JSONResponse({"error": "No such project."}, status_code=404)
-        ws_id = ws["id"]
+            return _err("No such project.", 404)
+        ws_id, account_id = ws["id"], account["id"]
 
     async def stream():
         last = None
@@ -494,16 +746,19 @@ async def events(request: Request) -> Response:
             if await request.is_disconnected():
                 return
             with db.connect() as conn:
+                still = store.account_for_session(conn, raw)
+                if still is None or store.resolve_project(conn, account_id, slug) is None:
+                    yield "event: gone\ndata: {}\n\n"
+                    return
                 now = store.version(conn, ws_id)
                 if now != last:
-                    payload = json.dumps(store.snapshot(conn, ws_id), ensure_ascii=False)
+                    ws_now = store.resolve_project(conn, account_id, slug)
+                    payload = json.dumps({**store.snapshot(conn, ws_id), "role": ws_now["role"]},
+                                         ensure_ascii=False)
                     last = now
                 else:
                     payload = None
-            if payload is not None:
-                yield f"data: {payload}\n\n"
-            else:
-                yield ": keep-alive\n\n"  # keeps proxies from closing the connection
+            yield f"data: {payload}\n\n" if payload is not None else ": keep-alive\n\n"
             await asyncio.sleep(1.5)
 
     return StreamingResponse(
@@ -513,7 +768,7 @@ async def events(request: Request) -> Response:
     )
 
 
-# --- the page and its assets --------------------------------------------------
+# --- the page and its assets --------------------------------------------------------
 
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -524,6 +779,11 @@ MIME = {".css": "text/css", ".js": "text/javascript", ".html": "text/html"}
 async def web_view(request: Request) -> HTMLResponse:
     """The shell. It holds no data of its own; everything it shows comes through
     the signed-in endpoints above, so serving it to anyone gives away nothing."""
+    return HTMLResponse((STATIC / "index.html").read_text())
+
+
+@mcp.custom_route("/join/{code}", methods=["GET"])
+async def join_view(request: Request) -> HTMLResponse:
     return HTMLResponse((STATIC / "index.html").read_text())
 
 
@@ -541,7 +801,7 @@ async def static_file(request: Request) -> Response:
     return Response(path.read_bytes(), media_type=MIME.get(path.suffix, "application/octet-stream"))
 
 
-# --- app assembly ------------------------------------------------------------
+# --- app assembly ------------------------------------------------------------------
 
 
 class TokenPath:
@@ -570,6 +830,15 @@ class TokenPath:
 
 def build_app():
     db.init_db()
+    with db.connect() as conn:
+        purged = store.purge_deleted_projects(conn)
+    if purged:
+        print(f"purged {purged} project(s) deleted more than {store.TRASH_DAYS} days ago", flush=True)
+    if not auth.configured():
+        print("WARNING: Google sign-in is not configured (GOOGLE_CLIENT_ID, "
+              "GOOGLE_CLIENT_SECRET). Nobody can sign in to the web.", flush=True)
+    if os.environ.get("DEV_LOGIN") == "1":
+        print("DEV_LOGIN is on: sign-in without Google is open to this machine only.", flush=True)
     # stateless_http keeps connectors working across redeploys: there is no
     # session for a restart to lose, and we will be redeploying constantly.
     app = mcp.http_app(path="/mcp", stateless_http=True, allowed_hosts=["*"])

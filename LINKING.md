@@ -7,9 +7,11 @@ instructions, that says which project that assistant works in. The tools make
 
 ## The two things each person sets up
 
-**Once per person — the connector.** One URL, `https://<host>/u/<token>/mcp`,
-added to your assistant. It says who you are. It is the same for every project
-you are in, so it never needs touching again.
+**Once per assistant — the connection.** In the web, **Account → Connections →
+Create connection**. You get a URL, `https://<host>/u/<token>/mcp`, shown once:
+add it to your assistant as a custom connector. It says who you are, and it is
+the same for every project you are in, so it never needs touching again — unless
+it leaks, in which case you revoke it there and make another.
 
 **Once per project — the instructions.** In the web, open the project and press
 **Link a conversation**. It generates the text with the project already filled

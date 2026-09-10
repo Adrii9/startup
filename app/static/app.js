@@ -1,4 +1,4 @@
-/* Wiring. The server owns every project; this only draws them.
+/* Wiring. The server owns every project and every account; this only draws them.
 
    Flow: /api/me says who is signed in and which projects they are in. Picking a
    project loads its snapshot from /api/state and follows /events for changes.
@@ -10,6 +10,12 @@ const el = (tag, cls, txt) => {
   if (cls) n.className = cls;
   if (txt != null) n.textContent = txt;
   return n;
+};
+const btn = (cls, txt, onClick) => {
+  const b = el('button', cls, txt);
+  b.type = 'button';
+  if (onClick) b.addEventListener('click', onClick);
+  return b;
 };
 
 const LEVEL_COLOUR = {
@@ -27,28 +33,30 @@ const IN_STATE = {
 };
 
 const S = {
-  me: null, slug: null, state: null, open: null, query: '',
+  config: { google: false, dev: false }, me: null, slug: null, state: null, open: null, query: '',
   view: LS.get('sc.view') || 'board',
   dim: +(LS.get('sc.dim') || 2),
   collapsed: LS.get('sc.collapsed') === '1'
 };
 let graph, source, meTimer;
 
-const initials = n => n.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
-const fmt = iso => {
-  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso.replace(' ', 'T') + 'Z');
-  return new Intl.DateTimeFormat(locale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(d);
-};
+const initials = n => n.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase() || '·';
+const toDate = iso => new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso.replace(' ', 'T') + 'Z');
+const fmt = iso => new Intl.DateTimeFormat(locale(), {
+  day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(toDate(iso));
+const fmtDay = iso => new Intl.DateTimeFormat(locale(), { day: 'numeric', month: 'short' }).format(toDate(iso));
+const who = e => e.member_gone ? t('former_member') : e.member_name;
 const entry = id => S.state.events.find(e => e.id === id);
 const project = () => S.me && S.me.projects.find(p => p.slug === S.slug);
+const isOwner = () => S.state && S.state.role === 'owner';
 
 async function api(path, opts = {}) {
   const r = await fetch(path, {
-    ...opts,
+    method: opts.method || 'GET',
     headers: opts.body ? { 'content-type': 'application/json' } : undefined,
     body: opts.body ? JSON.stringify(opts.body) : undefined
   });
-  if (r.status === 401) { showLogin(); throw new Error('signed out'); }
+  if (r.status === 401 && !opts.quiet401) { showLogin(); throw new Error('signed out'); }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status });
   return data;
@@ -59,37 +67,125 @@ function toast(msg) {
   const n = $('#toast');
   n.textContent = msg; n.hidden = false;
   clearTimeout(toastT);
-  toastT = setTimeout(() => { n.hidden = true; }, 2600);
+  toastT = setTimeout(() => { n.hidden = true; }, 2800);
 }
 
-/* ── sign in / out ────────────────────────────────────────────────── */
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = el('textarea'); ta.value = text; document.body.append(ta);
+    ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  toast(t('copied'));
+}
+
+/* ── one dialog shell, filled per use ─────────────────────────────── */
+function openSheet({ title, body, foot = [], wide = false }) {
+  $('#sheetTitle').textContent = title;
+  $('#sheet').classList.toggle('wide-sheet', wide);
+  const b = $('#sheetBody'); b.textContent = '';
+  for (const n of [].concat(body)) b.append(n);
+  const f = $('#sheetFoot'); f.textContent = '';
+  for (const n of foot) f.append(n);
+  $('#sheetFoot').hidden = !foot.length;
+  $('#sheetModal').hidden = false;
+}
+function closeSheet() { $('#sheetModal').hidden = true; }
+
+/* A yes/no that resolves to whether the person really meant it. Destructive
+   actions go through here rather than confirm(), so the consequence is spelled
+   out in the same words everywhere and the button says what it will do. */
+function confirmSheet({ title, body, action, danger = true }) {
+  return new Promise(resolve => {
+    const done = v => { closeSheet(); resolve(v); };
+    openSheet({
+      title,
+      body: [el('p', 'sheet-text', body)],
+      foot: [btn('ghost-btn', t('cancel'), () => done(false)),
+             btn(danger ? 'danger-btn' : 'primary-btn', action, () => done(true))]
+    });
+  });
+}
+
+function field(label, input) {
+  const f = el('label', 'field');
+  f.append(el('span', null, label), input);
+  return f;
+}
+function swatches(palette, current) {
+  const box = el('div', 'swatches');
+  box.dataset.colour = current;
+  for (const col of palette) {
+    const b = btn(col === current ? 'on' : '', null, () => {
+      for (const x of box.children) x.classList.remove('on');
+      b.classList.add('on'); box.dataset.colour = col;
+    });
+    b.style.background = col;
+    box.append(b);
+  }
+  return box;
+}
+
+/* ── signing in ───────────────────────────────────────────────────── */
 function showLogin() {
   if (source) { source.close(); source = null; }
   clearInterval(meTimer);
   S.me = null; S.state = null;
-  $('#app').hidden = true;
+  $('#app').hidden = true; $('#join').hidden = true;
   $('#login').hidden = false;
-  $('#loginErr').hidden = true;
-  $('#loginToken').value = '';
-  setTimeout(() => $('#loginToken').focus(), 0);
-}
-
-async function signIn(ev) {
-  ev.preventDefault();
-  const token = $('#loginToken').value.trim();
-  if (!token) return;
-  const r = await fetch('/api/login', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token })
-  });
-  if (!r.ok) { $('#loginErr').textContent = t('login_bad'); $('#loginErr').hidden = false; return; }
-  boot();
+  const next = location.pathname + location.hash;
+  $('#googleBtn').href = '/auth/google?next=' + encodeURIComponent(next);
+  $('#googleBtn').hidden = !S.config.google;
+  $('#googleMissing').hidden = S.config.google;
+  $('#devForm').hidden = !S.config.dev;
+  $('#devNext').value = next;
 }
 
 async function signOut() {
-  await fetch('/api/logout', { method: 'POST' });
+  await fetch('/auth/logout', { method: 'POST' });
+  history.replaceState(null, '', '/');
   showLogin();
   toast(t('t_signed_out'));
+}
+
+/* ── joining from an invite link ──────────────────────────────────── */
+async function showJoin(code) {
+  $('#app').hidden = true; $('#login').hidden = true; $('#join').hidden = false;
+  const r = await fetch('/api/invites/' + encodeURIComponent(code));
+  const b = $('#joinBtn'), g = $('#joinGoogle');
+  b.hidden = true; g.hidden = true;
+  if (!r.ok) {
+    $('#joinBead').hidden = true;
+    $('#joinTitle').textContent = t('join_invalid');
+    $('#joinHelp').textContent = t('join_invalid_help');
+    return;
+  }
+  const inv = await r.json();
+  $('#joinBead').hidden = false;
+  $('#joinBead').textContent = initials(inv.title);
+  $('#joinBead').style.setProperty('--c', inv.colour);
+  $('#joinTitle').textContent = t('join_title', { i: inv.inviter, t: inv.title });
+  if (inv.already_member) {
+    $('#joinHelp').textContent = t('join_already');
+    b.hidden = false; b.textContent = t('join_open');
+    b.onclick = () => { location.href = '/#' + inv.slug; };
+  } else if (inv.signed_in) {
+    $('#joinHelp').textContent = t('join_help');
+    b.hidden = false; b.textContent = t('join_btn');
+    b.onclick = async () => {
+      const res = await api('/api/invites/' + encodeURIComponent(code) + '/accept', { method: 'POST' });
+      location.href = '/#' + res.slug;
+    };
+  } else {
+    $('#joinHelp').textContent = t('join_help');
+    g.hidden = false;
+    g.textContent = t('join_google');
+    g.href = S.config.google ? '/auth/google?next=' + encodeURIComponent('/join/' + code) : '#';
+    if (S.config.dev) {
+      g.href = '#';
+      g.onclick = ev => { ev.preventDefault(); $('#devNext').value = '/join/' + code; showLogin(); };
+    }
+  }
 }
 
 /* ── projects rail ────────────────────────────────────────────────── */
@@ -99,7 +195,6 @@ function renderSidebar() {
   const q = S.query.trim().toLowerCase();
   const shown = S.me.projects.filter(p => !q || p.title.toLowerCase().includes(q));
   $('#noResults').hidden = shown.length > 0 || !q;
-  if (!S.me.projects.length) list.append(el('p', 'no-results', t('no_projects')));
 
   for (const p of shown) {
     const row = el('button', 'ctx' + (p.slug === S.slug ? ' on' : ''));
@@ -113,7 +208,29 @@ function renderSidebar() {
     row.addEventListener('click', () => selectProject(p.slug));
     list.append(row);
   }
-  $('#whoami').textContent = t('signed_as', { n: S.me.name });
+  const a = S.me.account;
+  $('#accountName').textContent = a.name;
+  $('#accountAvatar').textContent = initials(a.name);
+  $('#accountBtn').title = a.email || a.name;
+}
+
+function renderAccountMenu() {
+  const m = $('#accountMenu');
+  m.textContent = '';
+  const head = el('div', 'menu-head');
+  head.append(el('b', null, S.me.account.name), el('span', null, S.me.account.email || ''));
+  m.append(head);
+  const item = (label, fn, cls = '') => {
+    const b = el('button', cls);
+    b.append(el('div', 'm-main', label));
+    b.addEventListener('click', () => { m.hidden = true; fn(); });
+    m.append(b);
+  };
+  item(t('acc_connections'), openConnections);
+  item(t('acc_trash'), openTrash);
+  m.append(el('hr'));
+  item(t('logout'), signOut);
+  item(t('acc_delete'), deleteAccount, 'danger-item');
 }
 
 async function refreshMe() {
@@ -126,7 +243,7 @@ async function refreshMe() {
 function selectProject(slug) {
   S.slug = slug;
   LS.set('sc.project', slug);
-  history.replaceState(null, '', '#' + slug);
+  history.replaceState(null, '', '/#' + slug);
   closeDetail();
   S.state = null;
   renderSidebar();
@@ -136,16 +253,27 @@ function selectProject(slug) {
   connect();
 }
 
+async function pickAfterChange(msg) {
+  await refreshMe();
+  const next = S.me.projects[0];
+  if (next) selectProject(next.slug); else { S.slug = null; S.state = null; renderTop(); }
+  if (msg) toast(msg);
+}
+
 /* ── live updates, one project at a time ──────────────────────────── */
 function connect() {
   const slug = S.slug;
   source = new EventSource('/events?project=' + encodeURIComponent(slug));
   source.onopen = () => setLive(true);
   source.onmessage = m => { if (slug === S.slug) { setLive(true); apply(JSON.parse(m.data)); } };
+  // The server says this project is no longer ours: removed, deleted, signed out.
+  source.addEventListener('gone', () => {
+    source.close(); source = null;
+    if (slug === S.slug) pickAfterChange(t('t_gone'));
+  });
   source.onerror = () => {
     setLive(false);
-    source.close();
-    // Reconnect only if still on the same project and still signed in.
+    if (source) source.close();
     setTimeout(() => { if (S.me && S.slug === slug) connect(); }, 3000);
   };
 }
@@ -250,7 +378,7 @@ function renderBoard() {
   for (const e of list) {
     const card = el('div', 'entry' + (e.is_dead ? ' dead' : ''));
     const head = el('div', 'e-head');
-    head.append(el('span', 'e-num', '#' + e.id), el('span', 'e-who', e.member_name),
+    head.append(el('span', 'e-num', '#' + e.id), el('span', 'e-who' + (e.member_gone ? ' gone-who' : ''), who(e)),
                 el('span', 'tag', e.agent), el('span', 'tag', t('lvl_' + e.level)));
     if (e.section_key) head.append(el('span', 'tag', e.section_key));
     head.append(el('span', 'e-when', fmt(e.created_at)));
@@ -314,7 +442,7 @@ function reopen() {
     const touched = S.state.events.filter(e => e.section_key === s.key).sort((a, b) => b.id - a.id);
     const rows = el('div', 'd-rows');
     rows.append(row(t('d_instate'), t('d_yes')), row(t('d_derived'), t('src_section')));
-    if (touched[0]) rows.append(row(t('d_when'), fmt(touched[0].created_at) + ' · ' + touched[0].member_name));
+    if (touched[0]) rows.append(row(t('d_when'), fmt(touched[0].created_at) + ' · ' + who(touched[0])));
     body.append(rows);
     if (touched.length) {
       body.append(el('h4', 'rubric', t('d_related')));
@@ -350,7 +478,7 @@ function reopen() {
     rows.append(row(t('d_level'), t('lvl_' + e.level)));
     rows.append(row(t('d_derived'), t(SOURCE_KEY[e.level_source] || 'src_none')));
     rows.append(row(t('d_instate'), t(e.is_dead ? 'd_meta_only' : IN_STATE[e.level])));
-    rows.append(row(t('d_author'), e.member_name));
+    rows.append(row(t('d_author'), who(e)));
     rows.append(row(t('d_agent'), e.agent));
     rows.append(row(t('d_when'), fmt(e.created_at)));
     if (e.section_key) rows.append(row(t('d_section'), e.section_key));
@@ -374,53 +502,29 @@ function reopen() {
 
 /* ── new project ──────────────────────────────────────────────────── */
 function openNewProject() {
-  $('#npName').value = '';
-  $('#npErr').hidden = true;
-  const sw = $('#npColours');
-  sw.textContent = '';
-  const pick = S.me.palette[S.me.projects.length % S.me.palette.length];
-  sw.dataset.colour = pick;
-  for (const col of S.me.palette) {
-    const b = el('button', col === pick ? 'on' : '');
-    b.type = 'button';
-    b.style.background = col;
-    b.addEventListener('click', () => {
-      for (const x of sw.children) x.classList.remove('on');
-      b.classList.add('on');
-      sw.dataset.colour = col;
-    });
-    sw.append(b);
-  }
-  const box = $('#npMembers');
-  box.textContent = '';
-  for (const name of S.me.people) {
-    const lab = el('label', 'check');
-    const cb = el('input');
-    cb.type = 'checkbox'; cb.value = name;
-    if (name === S.me.name) { cb.checked = true; cb.disabled = true; }
-    lab.append(cb, document.createTextNode(' ' + name + (name === S.me.name ? ' ' + t('np_you') : '')));
-    box.append(lab);
-  }
-  $('#npModal').hidden = false;
-  setTimeout(() => $('#npName').focus(), 0);
-}
-
-async function createProject(ev) {
-  ev.preventDefault();
-  const title = $('#npName').value.trim();
-  if (!title) { $('#npErr').textContent = t('np_need_name'); $('#npErr').hidden = false; return; }
-  const members = [...$('#npMembers').querySelectorAll('input:checked:not(:disabled)')].map(c => c.value);
-  try {
-    const r = await api('/api/projects', {
-      method: 'POST', body: { title, colour: $('#npColours').dataset.colour, members }
-    });
-    $('#npModal').hidden = true;
-    await refreshMe();
-    selectProject(r.slug);
-    toast(t('t_created', { n: r.title }));
-  } catch (e) {
-    $('#npErr').textContent = e.message; $('#npErr').hidden = false;
-  }
+  const name = el('input'); name.maxLength = 80;
+  const sw = swatches(S.me.palette, S.me.palette[S.me.projects.length % S.me.palette.length]);
+  const err = el('p', 'login-err'); err.hidden = true;
+  const create = async () => {
+    const title = name.value.trim();
+    if (!title) { err.textContent = t('np_need_name'); err.hidden = false; return; }
+    try {
+      const r = await api('/api/projects', { method: 'POST', body: { title, colour: sw.dataset.colour } });
+      closeSheet();
+      await refreshMe();
+      selectProject(r.slug);
+      toast(t('t_created', { n: r.title }));
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+  };
+  name.addEventListener('keydown', ev => { if (ev.key === 'Enter') create(); });
+  openSheet({
+    title: t('np_title'),
+    body: [field(t('np_name'), name), (() => { const f = el('div', 'field');
+      f.append(el('span', null, t('np_colour')), sw); return f; })(),
+      el('p', 'sheet-note', t('np_after')), err],
+    foot: [btn('ghost-btn', t('cancel'), closeSheet), btn('primary-btn', t('np_create'), create)]
+  });
+  setTimeout(() => name.focus(), 0);
 }
 
 /* ── link a conversation ──────────────────────────────────────────── */
@@ -428,21 +532,218 @@ async function openLink() {
   const p = project();
   if (!p) return;
   const r = await api(`/api/projects/${encodeURIComponent(p.slug)}/link?lang=${LANG}`);
-  $('#linkTitle').textContent = t('link_title', { t: p.title });
-  $('#linkSteps').textContent = t('link_steps', { t: p.title });
-  $('#linkText').value = r.text;
-  $('#linkNote').textContent = t('link_note');
-  $('#linkModal').hidden = false;
+  const ta = el('textarea', 'mono-area'); ta.readOnly = true; ta.value = r.text;
+  openSheet({
+    title: t('link_title', { t: p.title }), wide: true,
+    body: [el('p', 'link-steps', t('link_steps', { t: p.title })), ta,
+           el('p', 'sheet-note', t('link_note'))],
+    foot: [btn('ghost-btn', t('close'), closeSheet),
+           btn('primary-btn', t('copy'), () => copyText(ta.value))]
+  });
 }
 
-async function copyLink() {
-  const ta = $('#linkText');
-  try {
-    await navigator.clipboard.writeText(ta.value);
-  } catch (e) {
-    ta.select(); document.execCommand('copy');
+/* ── connections ──────────────────────────────────────────────────── */
+async function openConnections(fresh) {
+  const { connections } = await api('/api/connections');
+  const body = [el('p', 'sheet-text', t('con_help'))];
+
+  // The one moment a connector URL is visible. Nothing stores it, so this box
+  // is the only copy that will ever exist.
+  if (fresh) {
+    const box = el('div', 'fresh-url');
+    box.append(el('b', null, t('con_new_title') + ' · ' + fresh.label));
+    const url = el('code', 'url-line', fresh.url);
+    const row = el('div', 'url-row');
+    row.append(url, btn('primary-btn', t('copy'), () => copyText(fresh.url)));
+    box.append(row, el('p', 'warn-line', t('con_new_warning')));
+    body.push(box);
   }
-  toast(t('copied'));
+
+  const list = el('div', 'rows');
+  if (!connections.length) list.append(el('p', 'empty', t('con_empty')));
+  for (const c of connections) {
+    const r = el('div', 'item-row');
+    const main = el('div', 'item-main');
+    main.append(el('b', null, c.label));
+    main.append(el('span', 'item-sub', c.prefix + '… · ' + t('con_created', { d: fmtDay(c.created_at) }) +
+      ' · ' + (c.last_used_at ? t('con_used', { d: fmt(c.last_used_at) }) : t('con_never'))));
+    r.append(main, btn('ghost-btn small danger-text', t('con_revoke'), async () => {
+      const ok = await confirmSheet({ title: t('con_revoke_q', { n: c.label }),
+                                      body: t('con_revoke_body'), action: t('con_revoke') });
+      if (ok) { await api('/api/connections/' + c.id, { method: 'DELETE' }); toast(t('t_revoked')); }
+      openConnections();
+    }));
+    list.append(r);
+  }
+  body.push(list);
+
+  const label = el('input'); label.placeholder = t('con_placeholder'); label.maxLength = 60;
+  const make = async () => {
+    const made = await api('/api/connections', { method: 'POST', body: { label: label.value } });
+    openConnections(made);
+  };
+  label.addEventListener('keydown', ev => { if (ev.key === 'Enter') make(); });
+  const add = el('div', 'add-row');
+  add.append(label, btn('primary-btn', t('con_create'), make));
+  body.push(field(t('con_label'), add));
+
+  openSheet({ title: t('con_title'), body, wide: true, foot: [btn('ghost-btn', t('close'), closeSheet)] });
+}
+
+/* ── project settings ─────────────────────────────────────────────── */
+async function openSettings() {
+  const p = project();
+  if (!p) return;
+  const slug = encodeURIComponent(p.slug);
+  const { role, you, members } = await api(`/api/projects/${slug}/members`);
+  const owner = role === 'owner';
+  const body = [];
+
+  if (owner) {
+    const name = el('input'); name.value = p.title; name.maxLength = 80;
+    const sw = swatches(S.me.palette, p.colour);
+    const save = btn('primary-btn small', t('save'), async () => {
+      await api(`/api/projects/${slug}`, { method: 'PATCH',
+        body: { title: name.value, colour: sw.dataset.colour } });
+      await refreshMe(); renderTop(); toast(t('ps_saved'));
+    });
+    const top = el('div', 'settings-top');
+    top.append(field(t('ps_name'), name));
+    const cf = el('div', 'field'); cf.append(el('span', null, t('ps_colour')), sw);
+    top.append(cf, save);
+    body.push(top);
+  }
+
+  body.push(el('h4', 'rubric', t('ps_members')));
+  const mlist = el('div', 'rows');
+  for (const m of members) {
+    const r = el('div', 'item-row');
+    const main = el('div', 'item-main person-main');
+    main.append(el('span', 'p-bead', initials(m.name)));
+    const nm = el('div');
+    nm.append(el('b', null, m.name + (m.account_id === you ? ' ' + t('ps_you') : '')));
+    nm.append(el('span', 'item-sub', t(m.role === 'owner' ? 'ps_owner' : 'ps_member') +
+      (m.agent ? ' · ' + m.agent : '')));
+    main.append(nm);
+    r.append(main);
+    if (owner && m.role !== 'owner') {
+      const acts = el('div', 'item-acts');
+      acts.append(btn('ghost-btn small', t('ps_make_owner'), async () => {
+        if (await confirmSheet({ title: t('ps_owner_q', { n: m.name }), body: t('ps_owner_body'),
+                                 action: t('ps_make_owner'), danger: false })) {
+          await api(`/api/projects/${slug}/owner`, { method: 'POST', body: { account_id: m.account_id } });
+          await refreshMe(); selectProject(p.slug);
+        } else openSettings();
+      }));
+      acts.append(btn('ghost-btn small danger-text', t('ps_remove'), async () => {
+        if (await confirmSheet({ title: t('ps_remove_q', { n: m.name }), body: t('ps_remove_body'),
+                                 action: t('ps_remove') })) {
+          await api(`/api/projects/${slug}/members/${m.account_id}`, { method: 'DELETE' });
+        }
+        openSettings();
+      }));
+      r.append(acts);
+    }
+    mlist.append(r);
+  }
+  body.push(mlist);
+
+  if (owner) {
+    body.push(el('h4', 'rubric', t('ps_invites')));
+    body.push(el('p', 'sheet-note', t('ps_invite_help')));
+    const { invites } = await api(`/api/projects/${slug}/invites`);
+    const ilist = el('div', 'rows');
+    if (!invites.length) ilist.append(el('p', 'empty', t('ps_no_invites')));
+    for (const inv of invites) {
+      const r = el('div', 'item-row');
+      const main = el('div', 'item-main');
+      main.append(el('code', 'url-line', inv.url));
+      main.append(el('span', 'item-sub', t('ps_invite_meta', { d: fmtDay(inv.expires_at),
+        u: inv.max_uses ? inv.uses + '/' + inv.max_uses : inv.uses })));
+      const acts = el('div', 'item-acts');
+      acts.append(btn('ghost-btn small', t('copy'), () => copyText(inv.url)));
+      acts.append(btn('ghost-btn small danger-text', t('ps_invite_revoke'), async () => {
+        await api(`/api/projects/${slug}/invites/${inv.id}`, { method: 'DELETE' });
+        openSettings();
+      }));
+      r.append(main, acts);
+      ilist.append(r);
+    }
+    body.push(ilist);
+    body.push(btn('ghost-btn wide-btn', t('ps_invite_create'), async () => {
+      const inv = await api(`/api/projects/${slug}/invites`, { method: 'POST', body: {} });
+      await copyText(inv.url);
+      openSettings();
+    }));
+  } else {
+    body.push(el('p', 'sheet-note', t('ps_member_only')));
+  }
+
+  const danger = el('div', 'danger');
+  if (owner) {
+    danger.append(el('span', null, t('ps_danger')), btn('danger-btn', t('ps_delete'), async () => {
+      if (await confirmSheet({ title: t('ps_delete_q', { t: p.title }), body: t('ps_delete_body'),
+                               action: t('ps_delete') })) {
+        await api(`/api/projects/${slug}`, { method: 'DELETE' });
+        await pickAfterChange(t('t_deleted', { n: p.title }));
+      } else openSettings();
+    }));
+  } else {
+    danger.append(el('span', null, t('ps_danger')), btn('danger-btn', t('ps_leave'), async () => {
+      if (await confirmSheet({ title: t('ps_leave_q', { t: p.title }), body: t('ps_leave_body'),
+                               action: t('ps_leave') })) {
+        await api(`/api/projects/${slug}/members/${you}`, { method: 'DELETE' });
+        await pickAfterChange(t('t_left', { n: p.title }));
+      } else openSettings();
+    }));
+  }
+  body.push(danger);
+
+  openSheet({ title: t('ps_title', { t: p.title }), body, wide: true,
+              foot: [btn('ghost-btn', t('close'), closeSheet)] });
+}
+
+/* ── trash ────────────────────────────────────────────────────────── */
+async function openTrash() {
+  const { projects } = await api('/api/trash');
+  const list = el('div', 'rows');
+  if (!projects.length) list.append(el('p', 'empty', t('tr_empty')));
+  for (const p of projects) {
+    const r = el('div', 'item-row');
+    const main = el('div', 'item-main person-main');
+    const bead = el('span', 'bead small', initials(p.title)); bead.style.setProperty('--c', p.colour);
+    const nm = el('div');
+    nm.append(el('b', null, p.title), el('span', 'item-sub', t('tr_purge_on', { d: fmtDay(p.purge_at) })));
+    main.append(bead, nm);
+    r.append(main, btn('ghost-btn small', t('tr_restore'), async () => {
+      await api(`/api/projects/${encodeURIComponent(p.slug)}/restore`, { method: 'POST' });
+      closeSheet();
+      await refreshMe();
+      selectProject(p.slug);
+      toast(t('t_restored', { n: p.title }));
+    }));
+    list.append(r);
+  }
+  openSheet({ title: t('tr_title'), body: [el('p', 'sheet-text', t('tr_help')), list],
+              foot: [btn('ghost-btn', t('close'), closeSheet)] });
+}
+
+/* ── delete account ───────────────────────────────────────────────── */
+async function deleteAccount() {
+  const err = el('p', 'login-err'); err.hidden = true;
+  const go = async () => {
+    try {
+      await api('/api/account', { method: 'DELETE' });
+      closeSheet();
+      history.replaceState(null, '', '/');
+      showLogin();
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+  };
+  openSheet({
+    title: t('da_title'),
+    body: [el('p', 'sheet-text', t('da_body')), err],
+    foot: [btn('ghost-btn', t('cancel'), closeSheet), btn('danger-btn', t('da_confirm'), go)]
+  });
 }
 
 /* ── shell ────────────────────────────────────────────────────────── */
@@ -450,13 +751,14 @@ function applyStrings() {
   document.documentElement.lang = LANG;
   $('#loginTitle').textContent = t('login_title');
   $('#loginHelp').textContent = t('login_help');
-  $('#loginToken').placeholder = t('login_placeholder');
-  $('#loginGo').textContent = t('login_go');
+  $('#googleLabel').textContent = t('google_btn');
+  $('#googleMissing').textContent = t('google_missing');
+  $('#devLabel').textContent = t('dev_label');
+  $('#devGo').textContent = t('dev_go');
   $('#q').placeholder = t('search');
   $('#noResults').textContent = t('no_results');
   $('#collapseBtn').title = S.collapsed ? t('expand') : t('collapse');
   $('#newProjectBtn').querySelector('span').textContent = t('new_project');
-  $('#logoutBtn').textContent = t('logout');
   $('#viewSwitch').querySelector('[data-view=graph] span').textContent = t('view_graph');
   $('#viewSwitch').querySelector('[data-view=board] span').textContent = t('view_board');
   $('#linkBtn').querySelector('span').textContent = t('link');
@@ -467,15 +769,8 @@ function applyStrings() {
   $('#langLabel').textContent = LANG.toUpperCase();
   $('#detailClose').title = t('d_close');
   $('#graphHint').textContent = t(S.dim === 3 ? 'graph_hint_3d' : 'graph_hint_2d');
-  $('#npTitle').textContent = t('np_title');
-  $('#npNameL').textContent = t('np_name');
-  $('#npColourL').textContent = t('np_colour');
-  $('#npMembersL').textContent = t('np_members');
-  $('#npCancel').textContent = t('cancel');
-  $('#npCreate').textContent = t('np_create');
-  $('#linkCancel').textContent = t('cancel');
-  $('#linkCopy').textContent = t('copy');
   $('#emptyMsg').textContent = t('no_projects');
+  $('#emptyNew').textContent = t('empty_new');
 }
 
 function renderTop() {
@@ -485,9 +780,13 @@ function renderTop() {
   $('#wsMeta').textContent = st
     ? t('meta', { e: st.events.length, s: st.sections.length, m: st.members_active_today })
     : (p ? t('loading') : '');
+  // No project, nothing to be live about: an empty bar beats a green dot that lies.
+  document.querySelector('.ws').hidden = !p;
   $('#linkBtn').hidden = !p;
+  $('#settingsBtn').hidden = !p;
   for (const b of $('#viewSwitch').children) b.classList.toggle('on', b.dataset.view === S.view);
   for (const b of $('#dimSwitch').children) b.classList.toggle('on', +b.dataset.dim === S.dim);
+  $('#viewSwitch').hidden = !p;
   $('#emptyView').hidden = !!p;
   $('#graphView').hidden = !p || S.view !== 'graph';
   $('#boardView').hidden = !p || S.view !== 'board';
@@ -504,7 +803,8 @@ function renderLangMenu() {
     if (code === LANG) b.append(el('span', 'tick', '✓'));
     b.addEventListener('click', () => {
       setLang(code); m.hidden = true;
-      applyStrings(); renderSidebar(); renderTop();
+      applyStrings();
+      if (S.me) { renderSidebar(); renderTop(); }
       if (S.state) { renderBoard(); renderLegend(buildGraph(S.state)); }
       if (S.open) reopen();
     });
@@ -526,10 +826,15 @@ function apply(state) {
 }
 
 async function boot() {
+  try { S.config = await (await fetch('/api/config')).json(); } catch (e) { /* offline */ }
+
+  const join = location.pathname.match(/^\/join\/([^/]+)/);
+  if (join) return showJoin(decodeURIComponent(join[1]));
+
   let me;
   try { me = await api('/api/me'); } catch (e) { return; }
   S.me = me;
-  $('#login').hidden = true;
+  $('#login').hidden = true; $('#join').hidden = true;
   $('#app').hidden = false;
   document.getElementById('app').classList.toggle('collapsed', S.collapsed);
   graph.resize();
@@ -550,9 +855,6 @@ function init() {
     if (node.level === 'section') openSection(ref.key); else openEntry(ref.id);
   });
 
-  $('#loginForm').addEventListener('submit', signIn);
-  $('#logoutBtn').addEventListener('click', signOut);
-
   $('#collapseBtn').addEventListener('click', () => {
     S.collapsed = !S.collapsed;
     LS.set('sc.collapsed', S.collapsed ? '1' : '0');
@@ -562,16 +864,18 @@ function init() {
   $('#q').addEventListener('input', ev => { S.query = ev.target.value; renderSidebar(); });
 
   $('#newProjectBtn').addEventListener('click', openNewProject);
-  $('#npForm').addEventListener('submit', createProject);
-  for (const b of document.querySelectorAll('.np-close')) b.addEventListener('click', () => { $('#npModal').hidden = true; });
-
+  $('#emptyNew').addEventListener('click', openNewProject);
   $('#linkBtn').addEventListener('click', openLink);
-  $('#linkCopy').addEventListener('click', copyLink);
-  for (const b of document.querySelectorAll('.link-close')) b.addEventListener('click', () => { $('#linkModal').hidden = true; });
+  $('#settingsBtn').addEventListener('click', openSettings);
 
-  for (const id of ['#npModal', '#linkModal']) {
-    $(id).addEventListener('click', ev => { if (ev.target.id === id.slice(1)) $(id).hidden = true; });
-  }
+  $('#accountBtn').addEventListener('click', ev => {
+    ev.stopPropagation();
+    const m = $('#accountMenu');
+    if (m.hidden) { renderAccountMenu(); m.hidden = false; $('#langMenu').hidden = true; } else m.hidden = true;
+  });
+
+  $('#sheetClose').addEventListener('click', closeSheet);
+  $('#sheetModal').addEventListener('click', ev => { if (ev.target.id === 'sheetModal') closeSheet(); });
 
   $('#viewSwitch').addEventListener('click', ev => {
     const b = ev.target.closest('[data-view]'); if (!b) return;
@@ -591,15 +895,14 @@ function init() {
   $('#langBtn').addEventListener('click', ev => {
     ev.stopPropagation();
     const m = $('#langMenu');
-    if (m.hidden) { renderLangMenu(); m.hidden = false; } else m.hidden = true;
+    if (m.hidden) { renderLangMenu(); m.hidden = false; $('#accountMenu').hidden = true; } else m.hidden = true;
   });
-  document.addEventListener('click', () => { $('#langMenu').hidden = true; });
-  $('#langMenu').addEventListener('click', ev => ev.stopPropagation());
+  document.addEventListener('click', () => { $('#langMenu').hidden = true; $('#accountMenu').hidden = true; });
+  for (const id of ['#langMenu', '#accountMenu']) $(id).addEventListener('click', ev => ev.stopPropagation());
 
   document.addEventListener('keydown', ev => {
     if (ev.key !== 'Escape') return;
-    if (!$('#npModal').hidden) $('#npModal').hidden = true;
-    else if (!$('#linkModal').hidden) $('#linkModal').hidden = true;
+    if (!$('#sheetModal').hidden) closeSheet();
     else if (S.open) closeDetail();
   });
   window.addEventListener('hashchange', () => {
