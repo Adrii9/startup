@@ -97,7 +97,7 @@ def render(env: Envelope) -> str:
     s = env.state
     parts += [
         f"{RULE}\nSTATE\n{RULE}",
-        f"Workspace: {s['title']}",
+        f"Project: {s['title']}  [pass project=\"{s['slug']}\" on every call]",
         f"Sections: {s['sections']} · Entries: {s['events']} · "
         f"Members active today: {s['members_active_today']}",
     ]

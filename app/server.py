@@ -1,14 +1,14 @@
 """Transport wrappers.
 
-Two of them, on purpose:
+Three surfaces over the same functions in store.py:
 
   * an MCP server, for Claude and ChatGPT, which speak it natively
   * a plain HTTP/JSON pair of endpoints, for anything that does not -- Gemini
     through its API, a local model, whatever comes next
+  * the web view, for people, signed in with the same token their assistant uses
 
-Both call the same functions in store.py. MCP is a convenience here, never a
-requirement, which is what keeps a platform's connector policy from deciding
-whether a teammate can join.
+MCP is a convenience here, never a requirement, which is what keeps a
+platform's connector policy from deciding whether a teammate can join.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from starlette.responses import (
     StreamingResponse,
 )
 
-from . import db, render, store
+from . import db, linking, render, store
 
 mcp = FastMCP("shared-context")
 
@@ -112,25 +112,61 @@ def _member(conn):
     return member
 
 
+def _unknown_project(conn, member, slug: str) -> str:
+    """Never guess which project a call meant. Say which ones it could have.
+
+    Writing to the wrong project is the same failure as writing under the wrong
+    name, so it gets the same treatment: refuse, and make recovery one step.
+    """
+    options = ", ".join(
+        f'"{p["slug"]}" ({p["title"]})' for p in store.projects_for(conn, member["id"])
+    )
+    said = f'"{slug}" is not a project {member["name"]} is in. ' if slug else "No project given. "
+    return (
+        f"{said}Pass one of these as project=: {options}. It should be in the "
+        "instructions of the conversation you are working in."
+    )
+
+
+def _project(conn, member, slug: str):
+    ws = store.resolve_project(conn, member["id"], slug)
+    if ws is None:
+        raise ToolError(_unknown_project(conn, member, slug))
+    return ws
+
+
 # --- the two tools -----------------------------------------------------------
+
+ProjectArg = Annotated[
+    str,
+    Field(
+        description=(
+            "The project this conversation belongs to, e.g. 'tfg'. It is written in "
+            "the instructions of the conversation you are working in. If you do not "
+            "know it, pass an empty string: the error lists the projects you can use."
+        )
+    ),
+]
 
 
 @mcp.tool
-def catch_up() -> str:
-    """Get up to speed on the shared workspace this team is working in.
+def catch_up(project: ProjectArg) -> str:
+    """Get up to speed on a shared project this team is working in.
 
     Returns where things stand right now -- the decisions in force, what the team
     knows, and what is still open -- then the document, then everything teammates
-    have done since you last looked. Call this before starting any work in this
+    have done since you last looked. Call this before starting any work in the
     project, and whenever you need to know where things stand. Other people are
     working here with their own AI assistants, so this changes often.
     """
     with db.connect() as conn:
-        return render.render(store.catch_up(conn, _member(conn)))
+        member = _member(conn)
+        return render.render(store.catch_up(conn, member, _project(conn, member, project)))
 
 
 @mcp.tool
 def record(
+    project: ProjectArg,
     summary: Annotated[
         str,
         Field(
@@ -144,9 +180,11 @@ def record(
         str,
         Field(
             description=(
-                "The substance: what was worked out, the reasoning, the numbers, the "
-                "wording that was agreed. Write it for a teammate's assistant that was "
-                "not in this conversation and never will be. Several lines is normal."
+                "What a teammate needs in order to act: the reasoning, the numbers, "
+                "what was agreed. Not the whole answer and not all the research -- a "
+                "teammate's assistant reads this in every catch_up, so a wall of text "
+                "here costs everyone. Write it for someone who was not in this "
+                "conversation and never will be."
             )
         ),
     ] = "",
@@ -204,14 +242,14 @@ def record(
         int,
         Field(
             description=(
-                "Entry number this replaces: a decision it reverses, or a question it "
-                "answers. Use it -- otherwise the standing summary keeps showing the "
-                "dead decision and teammates keep acting on it."
+                "Entry number this replaces: a decision it reverses, a question it "
+                "answers, or a fact it corrects. Use it -- otherwise the standing "
+                "summary keeps showing the dead one and teammates keep acting on it."
             )
         ),
     ] = 0,
 ) -> str:
-    """Record something into the shared workspace so the team's other assistants see it.
+    """Record something into a shared project so the team's other assistants see it.
 
     Call this whenever a decision is made, something is produced, something is
     dropped, or a fact about the project is established -- not on every turn, or
@@ -224,9 +262,11 @@ def record(
     Returns confirmation plus anything teammates did in the meantime.
     """
     with db.connect() as conn:
+        member = _member(conn)
         env = store.record(
             conn,
-            _member(conn),
+            member,
+            _project(conn, member, project),
             agent=_agent(),
             summary=summary,
             details=details,
@@ -245,30 +285,40 @@ def record(
 # --- the same thing over plain HTTP, for clients that do not speak MCP --------
 
 
+def _http_member(conn, request: Request):
+    return store.resolve_member(
+        conn, request.query_params.get("k") or request.headers.get("x-member-token")
+    )
+
+
 @mcp.custom_route("/api/catch_up", methods=["GET", "POST"])
 async def api_catch_up(request: Request) -> JSONResponse:
     with db.connect() as conn:
-        member = store.resolve_member(
-            conn, request.query_params.get("k") or request.headers.get("x-member-token")
-        )
+        member = _http_member(conn, request)
         if member is None:
             return JSONResponse({"error": UNKNOWN_TOKEN}, status_code=403)
-        env = store.catch_up(conn, member)
-        return JSONResponse({"text": render.render(env)})
+        slug = request.query_params.get("project", "")
+        ws = store.resolve_project(conn, member["id"], slug)
+        if ws is None:
+            return JSONResponse({"error": _unknown_project(conn, member, slug)}, status_code=400)
+        return JSONResponse({"text": render.render(store.catch_up(conn, member, ws))})
 
 
 @mcp.custom_route("/api/record", methods=["POST"])
 async def api_record(request: Request) -> JSONResponse:
     payload = await request.json()
     with db.connect() as conn:
-        member = store.resolve_member(
-            conn, request.query_params.get("k") or request.headers.get("x-member-token")
-        )
+        member = _http_member(conn, request)
         if member is None:
             return JSONResponse({"error": UNKNOWN_TOKEN}, status_code=403)
+        slug = payload.get("project") or request.query_params.get("project", "")
+        ws = store.resolve_project(conn, member["id"], slug)
+        if ws is None:
+            return JSONResponse({"error": _unknown_project(conn, member, slug)}, status_code=400)
         env = store.record(
             conn,
             member,
+            ws,
             agent=payload.get("agent", "http"),
             summary=payload["summary"],
             details=payload.get("details", ""),
@@ -284,51 +334,159 @@ async def api_record(request: Request) -> JSONResponse:
         return JSONResponse({"text": render.render(env)})
 
 
-# --- the human view ----------------------------------------------------------
+# --- the web: signed in with the same token the assistant uses ----------------
+
+COOKIE = "sc_token"
+NOT_SIGNED_IN = JSONResponse({"error": "not signed in"}, status_code=401)
 
 
-STATIC = Path(__file__).resolve().parent / "static"
-MIME = {".css": "text/css", ".js": "text/javascript", ".html": "text/html"}
+def _web_member(conn, request: Request):
+    return store.resolve_member(conn, request.cookies.get(COOKIE))
 
 
-@mcp.custom_route("/", methods=["GET"])
-async def web_view(request: Request) -> HTMLResponse:
-    """Deliberately readable without connecting any AI at all.
+def _is_local(request: Request) -> bool:
+    host = request.headers.get("host", "")
+    return host.startswith(("127.0.0.1", "localhost"))
 
-    This is the answer to the onboarding problem: a new teammate opens a link,
-    sees the project moving, and wires up their own assistant afterwards.
+
+@mcp.custom_route("/api/login", methods=["POST"])
+async def api_login(request: Request) -> JSONResponse:
+    """Sign in with a token, or with the whole connector URL.
+
+    People have the connector URL, not the bare token -- that is what they were
+    given and what they pasted into their assistant -- so accept either.
+
+    The token goes into an HttpOnly cookie: page scripts never see it, so a
+    script that got onto the page could not read it and send it elsewhere.
     """
-    return HTMLResponse((STATIC / "index.html").read_text())
+    payload = await request.json()
+    raw = (payload.get("token") or "").strip()
+    match = re.search(r"/u/([A-Za-z0-9_.-]+)", raw)
+    token = match.group(1) if match else raw
+    with db.connect() as conn:
+        member = store.resolve_member(conn, token)
+    if member is None:
+        return JSONResponse({"error": "That token does not match anyone."}, status_code=401)
+    resp = JSONResponse({"name": member["name"]})
+    resp.set_cookie(
+        COOKIE, token, max_age=60 * 60 * 24 * 90, path="/",
+        httponly=True, samesite="lax", secure=not _is_local(request),
+    )
+    return resp
 
 
-@mcp.custom_route("/s/{name}", methods=["GET"])
-async def static_file(request: Request) -> Response:
-    """Serve the shell's assets, and nothing else.
+@mcp.custom_route("/api/logout", methods=["POST"])
+async def api_logout(request: Request) -> JSONResponse:
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE, path="/")
+    return resp
 
-    Resolved against the static directory and checked to still be inside it, so
-    a crafted name cannot walk out of the folder.
+
+@mcp.custom_route("/api/me", methods=["GET"])
+async def api_me(request: Request) -> JSONResponse:
+    with db.connect() as conn:
+        member = _web_member(conn, request)
+        if member is None:
+            return NOT_SIGNED_IN
+        projects = [
+            {
+                "slug": p["slug"],
+                "title": p["title"],
+                "colour": p["colour"],
+                "members": [m["name"] for m in store.members_of(conn, p["id"])],
+                "unread": store.unread_for(conn, member["id"], p["id"]),
+            }
+            for p in store.projects_for(conn, member["id"])
+        ]
+        return JSONResponse(
+            {"name": member["name"], "people": store.everyone(conn), "projects": projects,
+             "palette": list(store.PALETTE)}
+        )
+
+
+@mcp.custom_route("/api/projects", methods=["POST"])
+async def api_create_project(request: Request) -> JSONResponse:
+    payload = await request.json()
+    with db.connect() as conn:
+        member = _web_member(conn, request)
+        if member is None:
+            return NOT_SIGNED_IN
+        if not (payload.get("title") or "").strip():
+            return JSONResponse({"error": "A project needs a name."}, status_code=400)
+        ws = store.create_project(
+            conn, member["id"], payload["title"], payload.get("colour", ""),
+            [n for n in payload.get("members", []) if n != member["name"]],
+        )
+        return JSONResponse({"slug": ws["slug"], "title": ws["title"]})
+
+
+@mcp.custom_route("/api/projects/{slug}/members", methods=["POST"])
+async def api_add_member(request: Request) -> JSONResponse:
+    payload = await request.json()
+    with db.connect() as conn:
+        member = _web_member(conn, request)
+        if member is None:
+            return NOT_SIGNED_IN
+        ws = store.resolve_project(conn, member["id"], request.path_params["slug"])
+        if ws is None:
+            return JSONResponse({"error": "No such project."}, status_code=404)
+        if store.add_member(conn, ws["id"], payload.get("name", "")) is None:
+            return JSONResponse({"error": "Nobody by that name."}, status_code=404)
+        return JSONResponse({"members": [m["name"] for m in store.members_of(conn, ws["id"])]})
+
+
+@mcp.custom_route("/api/projects/{slug}/link", methods=["GET"])
+async def api_link(request: Request) -> JSONResponse:
+    """The text that links a conversation to this project.
+
+    Deliberately does not include the person's connector URL or token: that is
+    set up once per person, not per project, and it has no business being
+    handed to a page script.
     """
-    name = request.path_params["name"]
-    path = (STATIC / name).resolve()
-    if not path.is_file() or STATIC.resolve() not in path.parents:
-        return PlainTextResponse("not found", status_code=404)
-    return Response(path.read_bytes(), media_type=MIME.get(path.suffix, "application/octet-stream"))
+    with db.connect() as conn:
+        member = _web_member(conn, request)
+        if member is None:
+            return NOT_SIGNED_IN
+        ws = store.resolve_project(conn, member["id"], request.path_params["slug"])
+        if ws is None:
+            return JSONResponse({"error": "No such project."}, status_code=404)
+        lang = request.query_params.get("lang", "ca")
+        return JSONResponse(
+            {"slug": ws["slug"], "text": linking.instructions(ws["slug"], ws["title"], lang)}
+        )
 
 
 @mcp.custom_route("/api/state", methods=["GET"])
 async def api_state(request: Request) -> JSONResponse:
     with db.connect() as conn:
-        return JSONResponse(store.snapshot(conn, store.workspace_id(conn)))
+        member = _web_member(conn, request)
+        if member is None:
+            return NOT_SIGNED_IN
+        ws = store.resolve_project(conn, member["id"], request.query_params.get("project"))
+        if ws is None:
+            return JSONResponse({"error": "No such project."}, status_code=404)
+        return JSONResponse(store.snapshot(conn, ws["id"]))
 
 
 @mcp.custom_route("/events", methods=["GET"])
-async def events(request: Request) -> StreamingResponse:
-    """Server-sent events, driven by polling the log's high-water mark.
+async def events(request: Request) -> Response:
+    """Server-sent events for one project, driven by polling its high-water mark.
 
     Polling rather than an in-process broadcast on purpose: writes can arrive
-    from any worker, and comparing two integers every second and a half costs
+    from any worker, and comparing three integers every second and a half costs
     nothing at this size. It also keeps store.py unaware that SSE exists.
+
+    Membership is checked before the stream opens: a page can only ever follow
+    a project its signed-in person is in.
     """
+    with db.connect() as conn:
+        member = _web_member(conn, request)
+        if member is None:
+            return NOT_SIGNED_IN
+        ws = store.resolve_project(conn, member["id"], request.query_params.get("project"))
+        if ws is None:
+            return JSONResponse({"error": "No such project."}, status_code=404)
+        ws_id = ws["id"]
 
     async def stream():
         last = None
@@ -336,7 +494,6 @@ async def events(request: Request) -> StreamingResponse:
             if await request.is_disconnected():
                 return
             with db.connect() as conn:
-                ws_id = store.workspace_id(conn)
                 now = store.version(conn, ws_id)
                 if now != last:
                     payload = json.dumps(store.snapshot(conn, ws_id), ensure_ascii=False)
@@ -354,6 +511,34 @@ async def events(request: Request) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# --- the page and its assets --------------------------------------------------
+
+
+STATIC = Path(__file__).resolve().parent / "static"
+MIME = {".css": "text/css", ".js": "text/javascript", ".html": "text/html"}
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def web_view(request: Request) -> HTMLResponse:
+    """The shell. It holds no data of its own; everything it shows comes through
+    the signed-in endpoints above, so serving it to anyone gives away nothing."""
+    return HTMLResponse((STATIC / "index.html").read_text())
+
+
+@mcp.custom_route("/s/{name}", methods=["GET"])
+async def static_file(request: Request) -> Response:
+    """Serve the shell's assets, and nothing else.
+
+    Resolved against the static directory and checked to still be inside it, so
+    a crafted name cannot walk out of the folder.
+    """
+    name = request.path_params["name"]
+    path = (STATIC / name).resolve()
+    if not path.is_file() or STATIC.resolve() not in path.parents:
+        return PlainTextResponse("not found", status_code=404)
+    return Response(path.read_bytes(), media_type=MIME.get(path.suffix, "application/octet-stream"))
 
 
 # --- app assembly ------------------------------------------------------------

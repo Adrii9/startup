@@ -76,10 +76,37 @@ quietly re-litigated.
 `supersedes` carries three meanings with one pointer: a decision reversed, a
 question answered, a fact corrected. Anything superseded drops out of the brief.
 
+## Projects
+
+A person has one token and can be in many projects. Everything — entries,
+sections, the read cursor — belongs to exactly one project, and nothing crosses
+between them: entry numbers count from #1 in each project, and a `supersedes` or
+`refs` pointing at another project's entry simply does not resolve.
+
+A project someone is not in behaves exactly like one that does not exist, both
+in the tools and in the web, so nobody learns which projects are taken by
+probing for them.
+
+## The web
+
+Sign in by pasting your connector URL (or just the token). It is kept in an
+HttpOnly cookie, out of reach of page scripts. Nothing about any project is
+served until you are signed in, and then only the projects you are in.
+
+From the web you create projects, choose who is in them, and generate the text
+that links a conversation to one — see [LINKING.md](LINKING.md).
+
+The strip at the top shows who is in the project and which assistant each last
+wrote with. That is what the web can honestly know: it cannot see anyone's
+conversations, so it does not offer to pick one.
+
 ## The two tools
 
-- `catch_up()` — the brief, the document, then everything since your cursor.
-- `record(summary, details, kind, intent, rejected, section, content, artifact, supersedes)`
+- `catch_up(project)` — the brief, the document, then everything since your cursor.
+- `record(project, summary, details, kind, intent, rejected, refs, section, content, artifact, supersedes)`
+
+`project` is required on both. An unknown or missing one is refused with the
+list of projects the caller is in.
 
 `kind` is one of `decision`, `fact`, `question`, `work`. The first three stay in
 the brief; `work` scrolls away into history. When a model omits it, it is

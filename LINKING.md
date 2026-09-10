@@ -1,62 +1,41 @@
-# Linking a conversation to the workspace
+# Linking a conversation to a project
 
-The server cannot make an assistant call anything. Linking is therefore not a
-switch we flip — it is an instruction each person gives their own assistant,
-once, and from then on the assistant knows it is working inside a shared
-project rather than alone.
+The server never sees a conversation, so linking cannot be something it
+remembers. It is a piece of text, pasted once into an assistant's project
+instructions, that says which project that assistant works in. The tools make
+`project` a required argument, so the assistant carries it on every call.
 
-## Claude
+## The two things each person sets up
 
-Create a **Project** in Claude, add the connector to it, and paste the text
-below into the project's instructions. Every conversation started inside that
-project is then linked.
+**Once per person — the connector.** One URL, `https://<host>/u/<token>/mcp`,
+added to your assistant. It says who you are. It is the same for every project
+you are in, so it never needs touching again.
 
----
+**Once per project — the instructions.** In the web, open the project and press
+**Link a conversation**. It generates the text with the project already filled
+in. Paste it into a Project in your assistant (in Claude: Projects → new → the
+instructions field). Every conversation started inside that Project then works
+in that project.
 
-This conversation is part of a shared project workspace. Other people are
-working in the same workspace, each with their own AI assistant.
+That is the whole mechanism. Nothing is wired between the web and your
+assistant; the button writes the instructions for you.
 
-**Before doing anything in this project, call `catch_up`.** It returns where
-things stand — the decisions in force, what the team knows, what is still open —
-followed by the document and anything teammates have done since I last looked.
-Do not rely on what you remember from earlier in this conversation: other people
-change things while we talk.
+## Why `project` is required rather than inferred
 
-**Call `record` when something is settled, produced, or dropped:**
+A missing or wrong project is the same failure as a wrong name: work lands where
+nobody expects it and nothing says so. So the server never guesses. An unknown
+or absent project is refused, and the error lists the projects the caller is in,
+which makes recovery one step. Models obey a required schema field far more
+reliably than a sentence in a prompt, which is why it is in the schema and not
+only in the text.
 
-- we decide something → `kind: "decision"`, with what we rejected and why
-- something becomes true about the project → `kind: "fact"`
-- a question is left hanging → `kind: "question"`
-- we produce something → `kind: "work"`
+## The text itself
 
-**At the end of any exchange where we worked something out, record it.** Err on
-the side of recording: a thin entry can be improved later, a lost decision
-cannot be recovered. If you are unsure whether something is worth an entry, it
-is.
-
-What does not need recording is the step-by-step of how we got there — one
-entry per thing established, not one per turn. A log of everything is another
-chat transcript, and nobody reads chat transcripts.
-
-**When a stretch of work ends, call `record` once** summarising what we worked
-out, what we were aiming for, and what we tried and abandoned. That last part
-exists only inside this conversation and is lost the moment it ends.
-
-**Write every entry for a teammate's assistant that cannot see this conversation
-and never will.** Put the substance in `details` — the reasoning, the numbers,
-the wording we agreed. `summary` is only the headline.
-
-If I did not say why I wanted something, leave `intent` empty. Do not
-reconstruct a reason: an invented rationale reaches my teammates as fact.
-
-When a decision reverses an earlier one, or an answer closes an open question,
-pass `supersedes` with that entry's number. Otherwise the standing summary keeps
-showing the dead one and everyone keeps acting on it.
-
----
+It lives in `app/linking.py`, one version per language the web speaks. Edit it
+there, not here: it is the most important prompt in the product, and the web
+serves it from that file.
 
 ## ChatGPT and Gemini
 
-Same text. In ChatGPT it goes in a Project's instructions; in Gemini CLI it goes
-in `GEMINI.md`. Both are wired up but neither has been used in anger yet — get
-it working between Claudes first, then port it.
+The same text works. In ChatGPT it goes in a Project's instructions; in Gemini
+CLI, in `GEMINI.md`. Both are wired up but neither has been used in anger yet.

@@ -34,7 +34,24 @@ const STRINGS = {
     src_fact: "s'ha registrat com a fet", src_question: "s'ha registrat com a pregunta",
     src_content: 'venien secció i contingut', src_none: 'només venia el titular',
     src_section: 'és una secció del document',
-    loading: 'Carregant…', failed: 'No s\'ha pogut llegir l\'espai.'
+    loading: 'Carregant…', failed: "No s'ha pogut llegir el projecte.",
+
+    login_title: 'Entra al teu espai',
+    login_help: 'Enganxa la URL del connector que tens posada a la teva IA, o només el token.',
+    login_placeholder: 'https://…/u/el-teu-token/mcp',
+    login_go: 'Entrar', login_bad: 'Aquest token no correspon a ningú.',
+    logout: 'Sortir', signed_as: 'Has entrat com a {n}',
+    search: 'Busca projectes', no_results: 'Cap projecte coincideix.',
+    new_project: 'Projecte nou', collapse: 'Amaga els projectes', expand: 'Mostra els projectes',
+    no_projects: 'Encara no ets a cap projecte.',
+    np_title: 'Projecte nou', np_name: 'Nom', np_colour: 'Color', np_members: 'Qui hi ha',
+    np_you: '(tu)', np_create: 'Crear', np_need_name: 'Posa-li un nom.',
+    cancel: 'Cancel·lar', copy: 'Copiar', copied: 'Copiat.',
+    link: 'Linkar una conversa', link_title: 'Linkar una conversa a «{t}»',
+    link_steps: "1. A la teva IA, crea un Projecte (a Claude: Projectes → nou).\n2. Assegura't que hi tens el connector de shared-context activat.\n3. Enganxa aquest text a les instruccions del Projecte.\n\nA partir d'aquí, cada conversa dins d'aquell Projecte treballa en «{t}».",
+    link_note: "El connector el configures un sol cop per persona. Aquest text és l'únic que canvia d'un projecte a l'altre.",
+    who_here: 'Qui hi ha', never_wrote: 'encara no ha escrit',
+    t_created: '«{n}» creat.', t_signed_out: 'Has sortit.'
   },
 
   es: {
@@ -64,7 +81,24 @@ const STRINGS = {
     src_fact: 'se registró como hecho', src_question: 'se registró como pregunta',
     src_content: 'vinieron sección y contenido', src_none: 'solo vino el titular',
     src_section: 'es una sección del documento',
-    loading: 'Cargando…', failed: 'No se ha podido leer el espacio.'
+    loading: 'Cargando…', failed: 'No se ha podido leer el proyecto.',
+
+    login_title: 'Entra en tu espacio',
+    login_help: 'Pega la URL del conector que tienes puesta en tu IA, o solo el token.',
+    login_placeholder: 'https://…/u/tu-token/mcp',
+    login_go: 'Entrar', login_bad: 'Ese token no corresponde a nadie.',
+    logout: 'Salir', signed_as: 'Has entrado como {n}',
+    search: 'Busca proyectos', no_results: 'Ningún proyecto coincide.',
+    new_project: 'Proyecto nuevo', collapse: 'Esconder los proyectos', expand: 'Mostrar los proyectos',
+    no_projects: 'Todavía no estás en ningún proyecto.',
+    np_title: 'Proyecto nuevo', np_name: 'Nombre', np_colour: 'Color', np_members: 'Quién está',
+    np_you: '(tú)', np_create: 'Crear', np_need_name: 'Ponle un nombre.',
+    cancel: 'Cancelar', copy: 'Copiar', copied: 'Copiado.',
+    link: 'Enlazar una conversación', link_title: 'Enlazar una conversación a «{t}»',
+    link_steps: '1. En tu IA, crea un Proyecto (en Claude: Proyectos → nuevo).\n2. Asegúrate de tener el conector de shared-context activado.\n3. Pega este texto en las instrucciones del Proyecto.\n\nA partir de ahí, cada conversación dentro de ese Proyecto trabaja en «{t}».',
+    link_note: 'El conector lo configuras una sola vez por persona. Este texto es lo único que cambia de un proyecto a otro.',
+    who_here: 'Quién está', never_wrote: 'aún no ha escrito',
+    t_created: '«{n}» creado.', t_signed_out: 'Has salido.'
   },
 
   en: {
@@ -94,7 +128,24 @@ const STRINGS = {
     src_fact: 'recorded as a fact', src_question: 'recorded as a question',
     src_content: 'section and content came with it', src_none: 'only a summary came with it',
     src_section: 'it is a section of the document',
-    loading: 'Loading…', failed: 'Could not read the workspace.'
+    loading: 'Loading…', failed: 'Could not read the project.',
+
+    login_title: 'Sign in to your workspace',
+    login_help: 'Paste the connector URL you gave your assistant, or just the token.',
+    login_placeholder: 'https://…/u/your-token/mcp',
+    login_go: 'Sign in', login_bad: 'That token does not match anyone.',
+    logout: 'Sign out', signed_as: 'Signed in as {n}',
+    search: 'Search projects', no_results: 'No project matches that.',
+    new_project: 'New project', collapse: 'Hide the projects', expand: 'Show the projects',
+    no_projects: 'You are not in any project yet.',
+    np_title: 'New project', np_name: 'Name', np_colour: 'Colour', np_members: 'Who is in it',
+    np_you: '(you)', np_create: 'Create', np_need_name: 'Give it a name.',
+    cancel: 'Cancel', copy: 'Copy', copied: 'Copied.',
+    link: 'Link a conversation', link_title: 'Link a conversation to “{t}”',
+    link_steps: '1. In your assistant, create a Project (in Claude: Projects → new).\n2. Make sure the shared-context connector is enabled there.\n3. Paste this text into the Project\'s instructions.\n\nFrom then on, every conversation inside that Project works in “{t}”.',
+    link_note: 'You set the connector up once per person. This text is the only thing that changes from one project to the next.',
+    who_here: 'Who is here', never_wrote: 'has not written yet',
+    t_created: '“{n}” created.', t_signed_out: 'Signed out.'
   }
 };
 

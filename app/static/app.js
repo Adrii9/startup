@@ -1,6 +1,8 @@
-/* Wiring. Everything renders off one snapshot from /api/state, which /events
-   pushes again whenever the log moves. No local model of the workspace: the
-   server owns it, this only draws it. */
+/* Wiring. The server owns every project; this only draws them.
+
+   Flow: /api/me says who is signed in and which projects they are in. Picking a
+   project loads its snapshot from /api/state and follows /events for changes.
+   Nothing is kept here that the server does not also have. */
 
 const $ = s => document.querySelector(s);
 const el = (tag, cls, txt) => {
@@ -24,14 +26,134 @@ const IN_STATE = {
   artifact: 'd_meta_only', write: 'd_title_only', note: 'd_delta_only', section: 'd_yes'
 };
 
-const S = { state: null, view: LS.get('sc.view') || 'board', dim: +(LS.get('sc.dim') || 2), open: null };
-let graph;
+const S = {
+  me: null, slug: null, state: null, open: null, query: '',
+  view: LS.get('sc.view') || 'board',
+  dim: +(LS.get('sc.dim') || 2),
+  collapsed: LS.get('sc.collapsed') === '1'
+};
+let graph, source, meTimer;
 
+const initials = n => n.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
 const fmt = iso => {
   const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso.replace(' ', 'T') + 'Z');
   return new Intl.DateTimeFormat(locale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(d);
 };
 const entry = id => S.state.events.find(e => e.id === id);
+const project = () => S.me && S.me.projects.find(p => p.slug === S.slug);
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: opts.body ? { 'content-type': 'application/json' } : undefined,
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  });
+  if (r.status === 401) { showLogin(); throw new Error('signed out'); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status });
+  return data;
+}
+
+let toastT;
+function toast(msg) {
+  const n = $('#toast');
+  n.textContent = msg; n.hidden = false;
+  clearTimeout(toastT);
+  toastT = setTimeout(() => { n.hidden = true; }, 2600);
+}
+
+/* ── sign in / out ────────────────────────────────────────────────── */
+function showLogin() {
+  if (source) { source.close(); source = null; }
+  clearInterval(meTimer);
+  S.me = null; S.state = null;
+  $('#app').hidden = true;
+  $('#login').hidden = false;
+  $('#loginErr').hidden = true;
+  $('#loginToken').value = '';
+  setTimeout(() => $('#loginToken').focus(), 0);
+}
+
+async function signIn(ev) {
+  ev.preventDefault();
+  const token = $('#loginToken').value.trim();
+  if (!token) return;
+  const r = await fetch('/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token })
+  });
+  if (!r.ok) { $('#loginErr').textContent = t('login_bad'); $('#loginErr').hidden = false; return; }
+  boot();
+}
+
+async function signOut() {
+  await fetch('/api/logout', { method: 'POST' });
+  showLogin();
+  toast(t('t_signed_out'));
+}
+
+/* ── projects rail ────────────────────────────────────────────────── */
+function renderSidebar() {
+  const list = $('#ctxList');
+  list.textContent = '';
+  const q = S.query.trim().toLowerCase();
+  const shown = S.me.projects.filter(p => !q || p.title.toLowerCase().includes(q));
+  $('#noResults').hidden = shown.length > 0 || !q;
+  if (!S.me.projects.length) list.append(el('p', 'no-results', t('no_projects')));
+
+  for (const p of shown) {
+    const row = el('button', 'ctx' + (p.slug === S.slug ? ' on' : ''));
+    row.style.setProperty('--c', p.colour);
+    row.title = p.title;
+    row.append(el('div', 'bead', initials(p.title)));
+    const txt = el('div', 'ctx-text');
+    txt.append(el('span', 'ctx-name', p.title), el('span', 'ctx-sub', p.members.join(' · ')));
+    row.append(txt);
+    if (p.unread && p.slug !== S.slug) row.append(el('span', 'badge', String(p.unread)));
+    row.addEventListener('click', () => selectProject(p.slug));
+    list.append(row);
+  }
+  $('#whoami').textContent = t('signed_as', { n: S.me.name });
+}
+
+async function refreshMe() {
+  try {
+    S.me = await api('/api/me');
+    renderSidebar();
+  } catch (e) { /* signed out is handled inside api() */ }
+}
+
+function selectProject(slug) {
+  S.slug = slug;
+  LS.set('sc.project', slug);
+  history.replaceState(null, '', '#' + slug);
+  closeDetail();
+  S.state = null;
+  renderSidebar();
+  renderTop();
+  if (source) source.close();
+  api('/api/state?project=' + encodeURIComponent(slug)).then(apply).catch(() => setLive(false));
+  connect();
+}
+
+/* ── live updates, one project at a time ──────────────────────────── */
+function connect() {
+  const slug = S.slug;
+  source = new EventSource('/events?project=' + encodeURIComponent(slug));
+  source.onopen = () => setLive(true);
+  source.onmessage = m => { if (slug === S.slug) { setLive(true); apply(JSON.parse(m.data)); } };
+  source.onerror = () => {
+    setLive(false);
+    source.close();
+    // Reconnect only if still on the same project and still signed in.
+    setTimeout(() => { if (S.me && S.slug === slug) connect(); }, 3000);
+  };
+}
+
+function setLive(on) {
+  $('#wsLive').textContent = on ? t('live') : t('offline');
+  $('#wsLive').classList.toggle('off', !on);
+}
 
 /* ── graph, built from the same snapshot ──────────────────────────── */
 function buildGraph(st) {
@@ -62,6 +184,24 @@ function renderLegend(g) {
     i.style.background = n.colour;
     s.append(i, document.createTextNode(t('lvl_' + n.level)));
     box.append(s);
+  }
+}
+
+/* ── who is here, and through what ────────────────────────────────── */
+/* The web cannot see anyone's conversations, so it does not pretend to. What it
+   can see is which assistant last wrote under each name -- so that is what it
+   shows, instead of a "pick your session" menu that could never be true. */
+function renderPeople() {
+  const box = $('#people');
+  box.textContent = '';
+  if (!S.state) return;
+  box.title = t('who_here');
+  for (const m of S.state.members) {
+    const b = el('span', 'person' + (m.agent ? '' : ' idle'));
+    b.append(el('span', 'p-bead', initials(m.name)));
+    b.append(el('span', 'p-agent', m.agent || '—'));
+    b.title = m.name + ' · ' + (m.agent ? m.agent + ' · ' + fmt(m.last_at) : t('never_wrote'));
+    box.append(b);
   }
 }
 
@@ -232,11 +372,94 @@ function reopen() {
   $('#detail').classList.add('open');
 }
 
+/* ── new project ──────────────────────────────────────────────────── */
+function openNewProject() {
+  $('#npName').value = '';
+  $('#npErr').hidden = true;
+  const sw = $('#npColours');
+  sw.textContent = '';
+  const pick = S.me.palette[S.me.projects.length % S.me.palette.length];
+  sw.dataset.colour = pick;
+  for (const col of S.me.palette) {
+    const b = el('button', col === pick ? 'on' : '');
+    b.type = 'button';
+    b.style.background = col;
+    b.addEventListener('click', () => {
+      for (const x of sw.children) x.classList.remove('on');
+      b.classList.add('on');
+      sw.dataset.colour = col;
+    });
+    sw.append(b);
+  }
+  const box = $('#npMembers');
+  box.textContent = '';
+  for (const name of S.me.people) {
+    const lab = el('label', 'check');
+    const cb = el('input');
+    cb.type = 'checkbox'; cb.value = name;
+    if (name === S.me.name) { cb.checked = true; cb.disabled = true; }
+    lab.append(cb, document.createTextNode(' ' + name + (name === S.me.name ? ' ' + t('np_you') : '')));
+    box.append(lab);
+  }
+  $('#npModal').hidden = false;
+  setTimeout(() => $('#npName').focus(), 0);
+}
+
+async function createProject(ev) {
+  ev.preventDefault();
+  const title = $('#npName').value.trim();
+  if (!title) { $('#npErr').textContent = t('np_need_name'); $('#npErr').hidden = false; return; }
+  const members = [...$('#npMembers').querySelectorAll('input:checked:not(:disabled)')].map(c => c.value);
+  try {
+    const r = await api('/api/projects', {
+      method: 'POST', body: { title, colour: $('#npColours').dataset.colour, members }
+    });
+    $('#npModal').hidden = true;
+    await refreshMe();
+    selectProject(r.slug);
+    toast(t('t_created', { n: r.title }));
+  } catch (e) {
+    $('#npErr').textContent = e.message; $('#npErr').hidden = false;
+  }
+}
+
+/* ── link a conversation ──────────────────────────────────────────── */
+async function openLink() {
+  const p = project();
+  if (!p) return;
+  const r = await api(`/api/projects/${encodeURIComponent(p.slug)}/link?lang=${LANG}`);
+  $('#linkTitle').textContent = t('link_title', { t: p.title });
+  $('#linkSteps').textContent = t('link_steps', { t: p.title });
+  $('#linkText').value = r.text;
+  $('#linkNote').textContent = t('link_note');
+  $('#linkModal').hidden = false;
+}
+
+async function copyLink() {
+  const ta = $('#linkText');
+  try {
+    await navigator.clipboard.writeText(ta.value);
+  } catch (e) {
+    ta.select(); document.execCommand('copy');
+  }
+  toast(t('copied'));
+}
+
 /* ── shell ────────────────────────────────────────────────────────── */
 function applyStrings() {
   document.documentElement.lang = LANG;
+  $('#loginTitle').textContent = t('login_title');
+  $('#loginHelp').textContent = t('login_help');
+  $('#loginToken').placeholder = t('login_placeholder');
+  $('#loginGo').textContent = t('login_go');
+  $('#q').placeholder = t('search');
+  $('#noResults').textContent = t('no_results');
+  $('#collapseBtn').title = S.collapsed ? t('expand') : t('collapse');
+  $('#newProjectBtn').querySelector('span').textContent = t('new_project');
+  $('#logoutBtn').textContent = t('logout');
   $('#viewSwitch').querySelector('[data-view=graph] span').textContent = t('view_graph');
   $('#viewSwitch').querySelector('[data-view=board] span').textContent = t('view_board');
+  $('#linkBtn').querySelector('span').textContent = t('link');
   $('#resetBtn').querySelector('span').textContent = t('reset_view');
   $('#lblStand').textContent = t('stand');
   $('#lblDoc').textContent = t('document');
@@ -244,19 +467,32 @@ function applyStrings() {
   $('#langLabel').textContent = LANG.toUpperCase();
   $('#detailClose').title = t('d_close');
   $('#graphHint').textContent = t(S.dim === 3 ? 'graph_hint_3d' : 'graph_hint_2d');
+  $('#npTitle').textContent = t('np_title');
+  $('#npNameL').textContent = t('np_name');
+  $('#npColourL').textContent = t('np_colour');
+  $('#npMembersL').textContent = t('np_members');
+  $('#npCancel').textContent = t('cancel');
+  $('#npCreate').textContent = t('np_create');
+  $('#linkCancel').textContent = t('cancel');
+  $('#linkCopy').textContent = t('copy');
+  $('#emptyMsg').textContent = t('no_projects');
 }
 
 function renderTop() {
-  const st = S.state;
-  $('#wsName').textContent = st ? st.title : t('loading');
+  const p = project(), st = S.state;
+  $('#wsDot').style.setProperty('--c', p ? p.colour : '#555');
+  $('#wsName').textContent = p ? p.title : '';
   $('#wsMeta').textContent = st
     ? t('meta', { e: st.events.length, s: st.sections.length, m: st.members_active_today })
-    : '';
+    : (p ? t('loading') : '');
+  $('#linkBtn').hidden = !p;
   for (const b of $('#viewSwitch').children) b.classList.toggle('on', b.dataset.view === S.view);
   for (const b of $('#dimSwitch').children) b.classList.toggle('on', +b.dataset.dim === S.dim);
-  $('#graphView').hidden = S.view !== 'graph';
-  $('#boardView').hidden = S.view !== 'board';
+  $('#emptyView').hidden = !!p;
+  $('#graphView').hidden = !p || S.view !== 'graph';
+  $('#boardView').hidden = !p || S.view !== 'board';
   $('#graphHint').textContent = t(S.dim === 3 ? 'graph_hint_3d' : 'graph_hint_2d');
+  renderPeople();
 }
 
 function renderLangMenu() {
@@ -268,7 +504,8 @@ function renderLangMenu() {
     if (code === LANG) b.append(el('span', 'tick', '✓'));
     b.addEventListener('click', () => {
       setLang(code); m.hidden = true;
-      applyStrings(); renderTop(); renderBoard(); renderLegend(buildGraph(S.state));
+      applyStrings(); renderSidebar(); renderTop();
+      if (S.state) { renderBoard(); renderLegend(buildGraph(S.state)); }
       if (S.open) reopen();
     });
     m.append(b);
@@ -276,8 +513,9 @@ function renderLangMenu() {
 }
 
 function apply(state) {
+  if (state.slug !== S.slug) return;   // a late answer for a project we have left
   S.state = state;
-  document.title = state.title;
+  document.title = state.title + ' · shared-context';
   renderTop();
   renderBoard();
   const g = buildGraph(state);
@@ -287,17 +525,23 @@ function apply(state) {
   if (S.open) reopen();
 }
 
-function setLive(on) {
-  $('#wsLive').textContent = on ? t('live') : t('offline');
-  $('#wsLive').classList.toggle('off', !on);
-}
+async function boot() {
+  let me;
+  try { me = await api('/api/me'); } catch (e) { return; }
+  S.me = me;
+  $('#login').hidden = true;
+  $('#app').hidden = false;
+  document.getElementById('app').classList.toggle('collapsed', S.collapsed);
+  graph.resize();
 
-let source;
-function connect() {
-  source = new EventSource('/events');
-  source.onopen = () => setLive(true);
-  source.onmessage = m => { setLive(true); apply(JSON.parse(m.data)); };
-  source.onerror = () => { setLive(false); source.close(); setTimeout(connect, 3000); };
+  const want = decodeURIComponent(location.hash.slice(1)) || LS.get('sc.project');
+  const pick = me.projects.find(p => p.slug === want) || me.projects[0];
+  renderSidebar();
+  if (pick) selectProject(pick.slug);
+  else { S.slug = null; renderTop(); }
+
+  clearInterval(meTimer);
+  meTimer = setInterval(refreshMe, 15000);   // unread counts for the other projects
 }
 
 function init() {
@@ -305,6 +549,29 @@ function init() {
     if (!ref) return closeDetail();
     if (node.level === 'section') openSection(ref.key); else openEntry(ref.id);
   });
+
+  $('#loginForm').addEventListener('submit', signIn);
+  $('#logoutBtn').addEventListener('click', signOut);
+
+  $('#collapseBtn').addEventListener('click', () => {
+    S.collapsed = !S.collapsed;
+    LS.set('sc.collapsed', S.collapsed ? '1' : '0');
+    document.getElementById('app').classList.toggle('collapsed', S.collapsed);
+    $('#collapseBtn').title = S.collapsed ? t('expand') : t('collapse');
+  });
+  $('#q').addEventListener('input', ev => { S.query = ev.target.value; renderSidebar(); });
+
+  $('#newProjectBtn').addEventListener('click', openNewProject);
+  $('#npForm').addEventListener('submit', createProject);
+  for (const b of document.querySelectorAll('.np-close')) b.addEventListener('click', () => { $('#npModal').hidden = true; });
+
+  $('#linkBtn').addEventListener('click', openLink);
+  $('#linkCopy').addEventListener('click', copyLink);
+  for (const b of document.querySelectorAll('.link-close')) b.addEventListener('click', () => { $('#linkModal').hidden = true; });
+
+  for (const id of ['#npModal', '#linkModal']) {
+    $(id).addEventListener('click', ev => { if (ev.target.id === id.slice(1)) $(id).hidden = true; });
+  }
 
   $('#viewSwitch').addEventListener('click', ev => {
     const b = ev.target.closest('[data-view]'); if (!b) return;
@@ -328,15 +595,22 @@ function init() {
   });
   document.addEventListener('click', () => { $('#langMenu').hidden = true; });
   $('#langMenu').addEventListener('click', ev => ev.stopPropagation());
-  document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && S.open) closeDetail(); });
+
+  document.addEventListener('keydown', ev => {
+    if (ev.key !== 'Escape') return;
+    if (!$('#npModal').hidden) $('#npModal').hidden = true;
+    else if (!$('#linkModal').hidden) $('#linkModal').hidden = true;
+    else if (S.open) closeDetail();
+  });
+  window.addEventListener('hashchange', () => {
+    const slug = decodeURIComponent(location.hash.slice(1));
+    if (S.me && slug !== S.slug && S.me.projects.some(p => p.slug === slug)) selectProject(slug);
+  });
 
   applyStrings();
-  renderTop();
   graph.spin = S.dim === 3;
   graph.start();
-
-  fetch('/api/state').then(r => r.json()).then(apply).catch(() => setLive(false));
-  connect();
+  boot();
 }
 
 init();

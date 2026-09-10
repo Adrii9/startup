@@ -274,9 +274,6 @@ input,select{font:inherit;color:inherit}
   .cols{grid-template-columns:1fr}
 }
 
-/* ── single workspace: no context rail (multiple contexts are not built yet) ── */
-#app.solo{grid-template-columns:1fr}
-
 /* The implicit grid row is sized `auto`, and a grid item's min-height defaults to
    auto too, so #main grew to fit every entry instead of stopping at the screen.
    With body{overflow:hidden} that clipped everything below the fold and left the
@@ -287,3 +284,47 @@ input,select{font:inherit;color:inherit}
 .live.off::before{background:var(--faint);animation:none}
 .stand p.q{color:var(--amber)}
 .e-line .art,.art{color:var(--cyan)}
+
+/* ── sign in ─────────────────────────────────────────────── */
+.login{position:fixed;inset:0;display:grid;place-items:center;padding:20px;background:var(--bg);z-index:90}
+.login-card{width:min(420px,100%);background:#131317;border:1px solid var(--line2);border-radius:16px;
+  padding:26px 24px;display:flex;flex-direction:column;gap:12px;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+.login-card h1{margin:0;font-size:17px;font-weight:650}
+.login-help{margin:0;font-size:13px;color:var(--dim);line-height:1.5}
+.login-card input{background:var(--card);border:1px solid var(--line);border-radius:9px;height:38px;
+  padding:0 11px;outline:none;font-size:13px}
+.login-card input:focus{border-color:var(--line2)}
+.login-card .primary-btn{height:36px;margin-top:4px}
+.login-err{margin:0;font-size:12.5px;color:var(--red)}
+
+/* ── rail footer: who is signed in ───────────────────────── */
+.side-bottom{display:flex;flex-direction:column;gap:6px}
+.whoami{display:flex;align-items:center;gap:6px;padding:0 4px;font-size:11.5px;color:var(--faint);min-width:0}
+.whoami span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#app.collapsed .whoami span{display:none}
+#app.collapsed .whoami{justify-content:center}
+
+/* ── who is here, and through what ───────────────────────── */
+.people{display:flex;gap:4px;align-items:center;margin-right:4px}
+.person{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 8px 0 3px;
+  border:1px solid var(--line);border-radius:14px;background:var(--card);cursor:default}
+.person.idle{opacity:.5}
+.p-bead{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;
+  font-size:9.5px;font-weight:700;background:var(--line2);color:var(--text)}
+.p-agent{font-size:11px;color:var(--dim)}
+@media (max-width:1100px){.p-agent{display:none}.person{padding:0 3px}}
+
+/* ── dialogs ─────────────────────────────────────────────── */
+form.sheet{margin:0}
+.wide-sheet{width:min(640px,100%)}
+.checks{display:flex;flex-direction:column;gap:6px}
+.check{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--text);cursor:pointer}
+.check input{accent-color:var(--violet)}
+.link-steps{margin:0;font-size:13px;color:var(--dim);line-height:1.6;white-space:pre-line}
+#linkText{width:100%;min-height:230px;resize:vertical;background:var(--card);border:1px solid var(--line);
+  border-radius:9px;padding:11px 12px;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--text);outline:none}
+.link-note{margin:0;font-size:11.5px;color:var(--faint);line-height:1.5}
+
+.empty-view{display:grid;place-items:center;color:var(--faint);font-size:14px}
+.whoami .ghost-btn{width:auto;flex:none}

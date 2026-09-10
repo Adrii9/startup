@@ -8,11 +8,51 @@
 </head>
 <body>
 
-<div id="app" class="solo">
-  <main id="main">
+<!-- ── SIGN IN: nothing about any project is shown until this passes ─────── -->
+<div id="login" class="login" hidden>
+  <form id="loginForm" class="login-card" autocomplete="off">
+    <h1 id="loginTitle"></h1>
+    <p id="loginHelp" class="login-help"></p>
+    <input id="loginToken" type="password" spellcheck="false">
+    <p id="loginErr" class="login-err" hidden></p>
+    <button id="loginGo" class="primary-btn" type="submit"></button>
+  </form>
+</div>
 
+<div id="app" hidden>
+
+  <!-- ── LEFT RAIL: the projects this person is in ──────────────────── -->
+  <aside id="sidebar">
+    <div class="side-top">
+      <button id="collapseBtn" class="icon-btn">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M4 5h16M4 12h10M4 19h16"/></svg>
+      </button>
+      <div class="search">
+        <svg viewBox="0 0 24 24" class="ic"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg>
+        <input id="q" type="search" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+
+    <nav id="ctxList" class="ctx-list"></nav>
+    <p id="noResults" class="no-results" hidden></p>
+
+    <div class="side-bottom">
+      <button id="newProjectBtn" class="ghost-btn">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>
+        <span></span>
+      </button>
+      <div class="whoami">
+        <span id="whoami"></span>
+        <button id="logoutBtn" class="ghost-btn small"></button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── MAIN ──────────────────────────────────────────────────────── -->
+  <main id="main">
     <header class="topbar">
       <div class="ws">
+        <span class="dot" id="wsDot"></span>
         <h1 id="wsName"></h1>
         <span class="live" id="wsLive"></span>
         <span class="meta" id="wsMeta"></span>
@@ -20,10 +60,17 @@
 
       <div class="grow"></div>
 
+      <div id="people" class="people"></div>
+
       <div class="seg" id="viewSwitch">
         <button data-view="board"><svg viewBox="0 0 24 24" class="ic"><rect x="4" y="4" width="7" height="16" rx="1.5"/><rect x="13" y="4" width="7" height="9" rx="1.5"/></svg><span></span></button>
         <button data-view="graph"><svg viewBox="0 0 24 24" class="ic"><circle cx="6" cy="7" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="17" r="2.4"/><path d="M7.7 8.6l3 6M16.6 8l-3.4 7.4M8.3 6.6h7.3"/></svg><span></span></button>
       </div>
+
+      <button id="linkBtn" class="ghost-btn wide">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
+        <span></span>
+      </button>
 
       <div class="dropdown">
         <button id="langBtn" class="icon-btn wide-sm"><span id="langLabel">CA</span></button>
@@ -48,7 +95,6 @@
       <div class="board-scroll">
         <h2 class="rubric" id="lblStand"></h2>
         <div class="stand" id="stand"></div>
-
         <div class="cols">
           <div class="col">
             <h2 class="rubric" id="lblDoc"></h2>
@@ -61,15 +107,58 @@
         </div>
       </div>
     </section>
+
+    <section id="emptyView" class="view empty-view" hidden>
+      <p id="emptyMsg"></p>
+    </section>
   </main>
 
   <aside id="detail" class="detail">
-    <button id="detailClose" class="icon-btn close" title="">
+    <button id="detailClose" class="icon-btn close">
       <svg viewBox="0 0 24 24" class="ic"><path d="M6 6l12 12M18 6L6 18"/></svg>
     </button>
     <div id="detailBody"></div>
   </aside>
 </div>
+
+<!-- ── NEW PROJECT ───────────────────────────────────────────────────── -->
+<div id="npModal" class="modal" hidden>
+  <form id="npForm" class="sheet">
+    <header><h3 id="npTitle"></h3>
+      <button type="button" class="icon-btn np-close"><svg viewBox="0 0 24 24" class="ic"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="sheet-body">
+      <label class="field"><span id="npNameL"></span><input id="npName" type="text" maxlength="80"></label>
+      <div class="field"><span id="npColourL"></span><div id="npColours" class="swatches"></div></div>
+      <div class="field"><span id="npMembersL"></span><div id="npMembers" class="checks"></div></div>
+      <p id="npErr" class="login-err" hidden></p>
+    </div>
+    <footer>
+      <button type="button" class="ghost-btn np-close" id="npCancel"></button>
+      <button type="submit" class="primary-btn" id="npCreate"></button>
+    </footer>
+  </form>
+</div>
+
+<!-- ── LINK A CONVERSATION ───────────────────────────────────────────── -->
+<div id="linkModal" class="modal" hidden>
+  <div class="sheet wide-sheet">
+    <header><h3 id="linkTitle"></h3>
+      <button type="button" class="icon-btn link-close"><svg viewBox="0 0 24 24" class="ic"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="sheet-body">
+      <p id="linkSteps" class="link-steps"></p>
+      <textarea id="linkText" readonly spellcheck="false"></textarea>
+      <p id="linkNote" class="link-note"></p>
+    </div>
+    <footer>
+      <button type="button" class="ghost-btn link-close" id="linkCancel"></button>
+      <button type="button" class="primary-btn" id="linkCopy"></button>
+    </footer>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
 
 <script src="/s/i18n.js"></script>
 <script src="/s/graph.js"></script>
