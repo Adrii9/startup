@@ -386,3 +386,22 @@ input,select{font:inherit;color:inherit}
 @media (max-width:1180px){.meta{display:none}}
 @media (max-width:980px){#linkBtn span{display:none}#linkBtn{padding:0 9px}}
 @media (max-width:860px){.people{display:none}.seg button span{display:none}.seg button{padding:0 8px}}
+
+/* ── the sign-in form ────────────────────────────────────── */
+.auth-tabs{align-self:stretch}
+.auth-tabs button{flex:1;justify-content:center}
+.auth-form{display:flex;flex-direction:column;gap:12px}
+.auth-form input{background:var(--card);border:1px solid var(--line);border-radius:9px;height:38px;
+  padding:0 11px;outline:none;font-size:14px}
+.auth-form input:focus{border-color:var(--line2)}
+.auth-form .primary-btn{height:38px;margin-top:2px}
+.auth-form .primary-btn:disabled{opacity:.6;cursor:default}
+.or-line{display:flex;align-items:center;gap:10px;color:var(--faint);font-size:11.5px}
+.or-line::before,.or-line::after{content:"";flex:1;height:1px;background:var(--line)}
+
+/* The sign-in card sat centred in a fixed layer that could not scroll, so on a
+   short screen -- a phone held sideways -- the button fell off the bottom with
+   no way to reach it. margin:auto centres it when it fits and lets it start at
+   the top when it does not, and the layer scrolls. */
+.login{display:flex;overflow-y:auto}
+.login-card{margin:auto}

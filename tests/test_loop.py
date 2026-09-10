@@ -28,8 +28,11 @@ def conn(tmp_path, monkeypatch):
         yield c
 
 
+PASSWORD = "correct horse battery"
+
+
 def acc(conn, name):
-    return store.account_from_google(conn, f"g-{name}", f"{name.lower()}@example.com", name)
+    return store.create_account(conn, name, PASSWORD)
 
 
 def team(conn):
@@ -94,6 +97,62 @@ def test_booting_twice_changes_nothing(tmp_path, monkeypatch):
 
 
 # --- accounts and sessions -------------------------------------------------------------
+
+
+def test_a_password_is_never_stored_as_itself(conn):
+    a = acc(conn, "Adria")
+    stored = conn.execute("SELECT password_hash FROM account WHERE id = ?", (a["id"],)).fetchone()[0]
+    assert PASSWORD not in stored and stored.startswith("scrypt$")
+    # Same password, different people: a different salt, so a different hash.
+    assert stored != acc(conn, "Oscar")["password_hash"]
+
+
+def test_signing_in_needs_the_right_password(conn):
+    a = acc(conn, "Adria")
+    assert store.verify_login(conn, "Adria", PASSWORD)["id"] == a["id"]
+    assert store.verify_login(conn, "adria", PASSWORD)["id"] == a["id"]   # case-insensitive
+    assert store.verify_login(conn, "Adria", "wrong password") is None
+    assert store.verify_login(conn, "Nobody", PASSWORD) is None
+
+
+def test_usernames_are_unique_whatever_the_case(conn):
+    acc(conn, "Adria")
+    with pytest.raises(store.Refused, match="taken"):
+        store.create_account(conn, "ADRIA", "another password")
+
+
+def test_what_a_username_and_password_may_be(conn):
+    assert store.create_account(conn, "Adrià", PASSWORD)["name"] == "Adrià"   # any alphabet
+    for bad in ("ab", "has space", "x" * 31, "semi;colon"):
+        with pytest.raises(store.Refused):
+            store.create_account(conn, bad, PASSWORD)
+    with pytest.raises(store.Refused, match="at least"):
+        store.create_account(conn, "Oscar", "short")
+
+
+def test_changing_the_password_signs_out_every_other_browser(conn):
+    a = acc(conn, "Adria")
+    here, elsewhere = store.create_session(conn, a["id"]), store.create_session(conn, a["id"])
+    with pytest.raises(store.Refused):
+        store.change_password(conn, a["id"], "not the current one", "brand new password")
+
+    store.change_password(conn, a["id"], PASSWORD, "brand new password", keep_session=here)
+    assert store.verify_login(conn, "Adria", PASSWORD) is None
+    assert store.verify_login(conn, "Adria", "brand new password") is not None
+    assert store.account_for_session(conn, here) is not None
+    assert store.account_for_session(conn, elsewhere) is None
+
+
+def test_a_deleted_account_frees_its_username_without_inheriting_its_past(conn):
+    a, o, _, ws = team(conn)
+    rec(conn, o, ws, kind="fact", summary="written by the first Oscar")
+    store.delete_account(conn, o["id"])
+
+    new_oscar = acc(conn, "Oscar")
+    assert new_oscar["id"] != o["id"]
+    assert store.verify_login(conn, "Oscar", PASSWORD)["id"] == new_oscar["id"]
+    assert store.resolve_project(conn, new_oscar["id"], ws["slug"]) is None
+    assert "Former member" in cu(conn, a, ws)
 
 
 def test_an_account_is_its_google_identity_not_its_email(conn):
@@ -524,7 +583,7 @@ def web(tmp_path, monkeypatch):
     from app import server
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
-    monkeypatch.delenv("DEV_LOGIN", raising=False)
+    server._ATTEMPTS.clear()
     db.init_db()
     # localhost, so session cookies are not marked Secure over plain http.
     with TestClient(server.app, base_url="http://localhost") as client:
@@ -547,11 +606,52 @@ def test_the_web_reveals_nothing_until_signed_in(web):
     assert web.get("/").status_code == 200        # the shell itself holds no data
 
 
-def test_sign_in_without_google_is_closed_even_when_switched_on(web, monkeypatch):
-    # TestClient's peer is not a loopback address, exactly like a public server.
-    monkeypatch.setenv("DEV_LOGIN", "1")
-    assert web.post("/auth/dev", data={"name": "Mallory"}).status_code == 404
-    assert web.get("/api/config").json()["dev"] is False
+def test_signing_up_and_in_over_http(web):
+    r = web.post("/auth/signup", json={"username": "Adria", "password": PASSWORD,
+                                       "next": "/join/abc"})
+    assert r.status_code == 200 and r.json()["next"] == "/join/abc"
+    assert "httponly" in r.headers["set-cookie"].lower()
+    assert web.get("/api/me").json()["account"]["name"] == "Adria"
+
+    web.post("/auth/logout")
+    assert web.get("/api/me").status_code == 401
+    r = web.post("/auth/login", json={"username": "adria", "password": PASSWORD,
+                                      "next": "//evil.example"})
+    assert r.status_code == 200 and r.json()["next"] == "/"      # no bouncing off-site
+    assert web.get("/api/me").status_code == 200
+
+
+def test_a_wrong_password_says_nothing_about_which_part_was_wrong(web):
+    web.post("/auth/signup", json={"username": "Adria", "password": PASSWORD})
+    web.cookies.clear()
+    wrong_pw = web.post("/auth/login", json={"username": "Adria", "password": "nope nope"})
+    no_user = web.post("/auth/login", json={"username": "Nobody", "password": "nope nope"})
+    assert wrong_pw.status_code == no_user.status_code == 401
+    assert wrong_pw.json() == no_user.json()
+
+
+def test_guessing_passwords_gets_locked_out(web):
+    web.post("/auth/signup", json={"username": "Adria", "password": PASSWORD})
+    web.cookies.clear()
+    for _ in range(5):
+        assert web.post("/auth/login", json={"username": "Adria", "password": "guess"}).status_code == 401
+    # Locked, and even the right password is refused until the window passes, so
+    # a guesser learns nothing from the answer.
+    assert web.post("/auth/login", json={"username": "Adria", "password": PASSWORD}).status_code == 429
+
+
+def test_changing_a_password_over_http(web):
+    web.post("/auth/signup", json={"username": "Adria", "password": PASSWORD})
+    assert web.post("/api/account/password",
+                    json={"current": "wrong", "new": "brand new password"}).status_code == 400
+    assert web.post("/api/account/password",
+                    json={"current": PASSWORD, "new": "brand new password"}).status_code == 200
+    assert web.get("/api/me").status_code == 200      # this browser stays signed in
+
+
+def test_there_is_no_way_in_without_a_password(web):
+    """The development sign-in that preceded passwords must not come back."""
+    assert web.post("/auth/dev", data={"name": "Mallory"}).status_code in (404, 405)
 
 
 def test_the_google_callback_rejects_a_state_it_did_not_issue(web, monkeypatch):

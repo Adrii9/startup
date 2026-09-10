@@ -42,17 +42,21 @@ def _db_path() -> Path:
 DB_PATH = _db_path()
 
 SCHEMA = """
--- A person, known by their Google account. Deleting an account keeps the row,
--- stripped of everything identifying, so that entries they wrote in shared
--- projects still have an author and other people's history does not break.
+-- A person. They sign up with a username and a password; Google sign-in is
+-- supported too but only switched on when its credentials are configured.
+-- Deleting an account keeps the row, stripped of everything identifying, so that
+-- entries they wrote in shared projects still have an author and other people's
+-- history does not break.
 CREATE TABLE IF NOT EXISTS account (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    google_sub TEXT UNIQUE,
-    email      TEXT,
-    name       TEXT NOT NULL,
-    picture    TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    deleted_at TEXT
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT,
+    password_hash TEXT,
+    google_sub    TEXT UNIQUE,
+    email         TEXT,
+    name          TEXT NOT NULL,
+    picture       TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at    TEXT
 );
 
 -- A signed-in browser. Only the hash is stored, so a copy of the database is
@@ -236,3 +240,13 @@ def init_db() -> None:
     _retire_old_database()
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # An account table made before passwords existed gets the two columns.
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(account)")}
+        for column in ("username", "password_hash"):
+            if column not in have:
+                conn.execute(f"ALTER TABLE account ADD COLUMN {column} TEXT")
+        # Unique regardless of case, so "Adria" and "adria" cannot both exist.
+        # An index rather than a column constraint, because SQLite cannot add a
+        # UNIQUE column to a table that already exists.
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_account_username "
+                     "ON account(username COLLATE NOCASE)")

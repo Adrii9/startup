@@ -8,11 +8,10 @@ tried and dropped — the part that is lost when a conversation ends.
 ## Run it
 
 ```bash
-DEV_LOGIN=1 uv run uvicorn app.server:app --port 8765 --reload
+uv run uvicorn app.server:app --port 8765 --reload
 ```
 
-Open <http://127.0.0.1:8765/>. Without Google credentials you can still sign in
-locally with the development form — see [Signing in](#signing-in).
+Open <http://127.0.0.1:8765/> and create an account.
 
 ```bash
 uv run pytest
@@ -28,7 +27,8 @@ chasing a `NULL`.
 ```
 app/db.py        schema. The event log is append-only and is the source of truth.
 app/store.py     everything the product does. No MCP, HTTP or browser code in it.
-app/auth.py      signing in with Google.
+app/passwords.py hashing and checking passwords.
+app/auth.py      the optional Google sign-in.
 app/linking.py   the text that links a conversation to a project.
 app/render.py    what an assistant actually reads back from a tool call.
 app/server.py    three surfaces over store.py: MCP, plain HTTP, and the web.
@@ -39,7 +39,7 @@ app/static/      the web: board, graph, detail panel, account and project admin.
 
 | | For | How you get it | What it can do |
 |---|---|---|---|
-| **Session** | a person in a browser | signing in with Google | manage your account and projects |
+| **Session** | a person in a browser | signing in | manage your account and projects |
 | **Connection** | one assistant | Account → Connections, in the web | read and write the projects you are in |
 
 A connection token lives inside a connector URL, gets pasted into assistant
@@ -52,24 +52,25 @@ made; a copy of the database is not a way into anyone's account.
 
 ## Signing in
 
-With Google, via the server-side authorization code flow in `app/auth.py`. No
-passwords are stored and account recovery is Google's job. An account is keyed
-on Google's `sub`, not on the email address, which can change hands.
+With a username and a password. Nothing to configure.
 
-Set in production:
+- Passwords are hashed with **scrypt** (standard library, about 20 ms each), with a
+  salt per account. The stored value is never the password.
+- A failed sign-in takes the same time and gives the same answer whether or not
+  the username exists, so the box does not reveal who has an account.
+- **Five wrong passwords for one username, or twenty from one address, lock
+  sign-in for 15 minutes** — and while locked even the right password is refused,
+  so a guesser learns nothing. Kept in memory; a restart clears it.
+- Changing your password signs out every other browser you were signed in on.
+- Usernames are unique regardless of case and may use any alphabet ("Adrià").
 
-| Variable | Value |
-|---|---|
-| `GOOGLE_CLIENT_ID` | from the OAuth client in Google Cloud |
-| `GOOGLE_CLIENT_SECRET` | same |
-| `PUBLIC_URL` | `https://<your host>` — Google checks the redirect URI against it exactly |
+**There is no password reset**, because the server sends no email. Someone who
+forgets theirs makes a new account and is invited back; what they wrote under the
+old one stays. That is a deliberate MVP trade-off, not an oversight.
 
-The redirect URI to register at Google is `<PUBLIC_URL>/auth/google/callback`.
-
-For local work, `DEV_LOGIN=1` enables a sign-in form that takes just a name. It
-has two locks, and both must hold: the variable is set, **and** the connection
-itself comes from a loopback address. Behind any proxy the peer is never
-loopback, so setting the variable on a public server still cannot open it.
+Google sign-in is built too, and stays hidden unless configured. To switch it on,
+set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `PUBLIC_URL`, and register
+`<PUBLIC_URL>/auth/google/callback` as the redirect URI in Google Cloud.
 
 ## Projects, roles and invites
 
@@ -79,7 +80,8 @@ writes through their assistant, and can leave. A project is never left without
 an owner: to leave, the owner hands it to someone first.
 
 People join through **invite links** — `/join/<code>`, sent however you like,
-valid for 7 days, revocable. Whoever opens one signs in with Google and is in.
+valid for 7 days, revocable. Whoever opens one signs in, or creates an account
+right there, and is in.
 There is deliberately no list of everyone to pick from: at any size beyond a
 group of friends, that list is itself a leak.
 

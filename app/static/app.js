@@ -33,7 +33,7 @@ const IN_STATE = {
 };
 
 const S = {
-  config: { google: false, dev: false }, me: null, slug: null, state: null, open: null, query: '',
+  config: { google: false }, me: null, slug: null, state: null, open: null, query: '',
   view: LS.get('sc.view') || 'board',
   dim: +(LS.get('sc.dim') || 2),
   collapsed: LS.get('sc.collapsed') === '1'
@@ -58,9 +58,14 @@ async function api(path, opts = {}) {
   });
   if (r.status === 401 && !opts.quiet401) { showLogin(); throw new Error('signed out'); }
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status });
+  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText),
+                                 { status: r.status, code: data.code, params: data.params });
   return data;
 }
+
+/* The server's reason, in the reader's language when it sent a code for it,
+   and in its own words otherwise. */
+const errMsg = e => (e.code && STRINGS.en[e.code]) ? t(e.code, e.params || {}) : e.message;
 
 let toastT;
 function toast(msg) {
@@ -127,18 +132,59 @@ function swatches(palette, current) {
 }
 
 /* ── signing in ───────────────────────────────────────────────────── */
-function showLogin() {
+let authMode = 'login';
+let authNext = '/';
+
+function showLogin(next) {
   if (source) { source.close(); source = null; }
   clearInterval(meTimer);
   S.me = null; S.state = null;
   $('#app').hidden = true; $('#join').hidden = true;
   $('#login').hidden = false;
-  const next = location.pathname + location.hash;
-  $('#googleBtn').href = '/auth/google?next=' + encodeURIComponent(next);
+  authNext = next || (location.pathname + location.hash) || '/';
+  // Google only appears when the server has it configured; otherwise the page
+  // is just the two fields, which is all an MVP needs.
+  $('#googleBtn').href = '/auth/google?next=' + encodeURIComponent(authNext);
   $('#googleBtn').hidden = !S.config.google;
-  $('#googleMissing').hidden = S.config.google;
-  $('#devForm').hidden = !S.config.dev;
-  $('#devNext').value = next;
+  $('#googleOr').hidden = !S.config.google;
+  setAuthMode(authMode);
+  // Focus without scrolling: on a short screen the browser would otherwise
+  // push the card up to show the field, hiding the sign-in / sign-up tabs.
+  setTimeout(() => $('#authUser').focus({ preventScroll: true }), 0);
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  for (const b of $('#authTabs').children) b.classList.toggle('on', b.dataset.mode === mode);
+  $('#authGo').textContent = t(mode === 'login' ? 'login_go' : 'signup_go');
+  $('#authPass').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  $('#authHint').hidden = mode !== 'signup';
+  $('#authErr').hidden = true;
+}
+
+async function submitAuth(ev) {
+  ev.preventDefault();
+  const body = { username: $('#authUser').value.trim(), password: $('#authPass').value, next: authNext };
+  $('#authGo').disabled = true;
+  try {
+    const r = await api('/auth/' + (authMode === 'login' ? 'login' : 'signup'),
+                        { method: 'POST', body, quiet401: true });
+    $('#authPass').value = '';
+    // Assigning an address that differs only after the # does not reload the
+    // page, so the app would sit on the sign-in screen. Same page: boot in place.
+    const target = new URL(r.next || '/', location.origin);
+    if (target.pathname === location.pathname) {
+      history.replaceState(null, '', target.pathname + target.hash);
+      boot();
+    } else {
+      location.href = target.href;
+    }
+  } catch (e) {
+    $('#authErr').textContent = errMsg(e);
+    $('#authErr').hidden = false;
+  } finally {
+    $('#authGo').disabled = false;
+  }
 }
 
 async function signOut() {
@@ -177,14 +223,10 @@ async function showJoin(code) {
       location.href = '/#' + res.slug;
     };
   } else {
+    // Not signed in: sign in or sign up, and come straight back here to join.
     $('#joinHelp').textContent = t('join_help');
-    g.hidden = false;
-    g.textContent = t('join_google');
-    g.href = S.config.google ? '/auth/google?next=' + encodeURIComponent('/join/' + code) : '#';
-    if (S.config.dev) {
-      g.href = '#';
-      g.onclick = ev => { ev.preventDefault(); $('#devNext').value = '/join/' + code; showLogin(); };
-    }
+    b.hidden = false; b.textContent = t('join_google');
+    b.onclick = () => { authMode = 'signup'; showLogin('/join/' + code); };
   }
 }
 
@@ -228,6 +270,7 @@ function renderAccountMenu() {
   };
   item(t('acc_connections'), openConnections);
   item(t('acc_trash'), openTrash);
+  item(t('acc_password'), openChangePassword);
   m.append(el('hr'));
   item(t('logout'), signOut);
   item(t('acc_delete'), deleteAccount, 'danger-item');
@@ -514,7 +557,7 @@ function openNewProject() {
       await refreshMe();
       selectProject(r.slug);
       toast(t('t_created', { n: r.title }));
-    } catch (e) { err.textContent = e.message; err.hidden = false; }
+    } catch (e) { err.textContent = errMsg(e); err.hidden = false; }
   };
   name.addEventListener('keydown', ev => { if (ev.key === 'Enter') create(); });
   openSheet({
@@ -728,6 +771,31 @@ async function openTrash() {
               foot: [btn('ghost-btn', t('close'), closeSheet)] });
 }
 
+/* ── change password ──────────────────────────────────────────────── */
+function openChangePassword() {
+  const pw = () => { const i = el('input'); i.type = 'password'; return i; };
+  const current = pw(), next = pw(), again = pw();
+  current.autocomplete = 'current-password';
+  next.autocomplete = again.autocomplete = 'new-password';
+  const err = el('p', 'login-err'); err.hidden = true;
+  const save = async () => {
+    if (next.value !== again.value) { err.textContent = t('pw_mismatch'); err.hidden = false; return; }
+    try {
+      await api('/api/account/password', { method: 'POST', body: { current: current.value, new: next.value } });
+      closeSheet();
+      toast(t('pw_done'));
+    } catch (e) { err.textContent = errMsg(e); err.hidden = false; }
+  };
+  again.addEventListener('keydown', ev => { if (ev.key === 'Enter') save(); });
+  openSheet({
+    title: t('pw_title'),
+    body: [field(t('pw_current'), current), field(t('pw_new'), next), field(t('pw_repeat'), again),
+           el('p', 'sheet-note', t('pw_note')), err],
+    foot: [btn('ghost-btn', t('cancel'), closeSheet), btn('primary-btn', t('save'), save)]
+  });
+  setTimeout(() => current.focus(), 0);
+}
+
 /* ── delete account ───────────────────────────────────────────────── */
 async function deleteAccount() {
   const err = el('p', 'login-err'); err.hidden = true;
@@ -737,7 +805,7 @@ async function deleteAccount() {
       closeSheet();
       history.replaceState(null, '', '/');
       showLogin();
-    } catch (e) { err.textContent = e.message; err.hidden = false; }
+    } catch (e) { err.textContent = errMsg(e); err.hidden = false; }
   };
   openSheet({
     title: t('da_title'),
@@ -752,9 +820,13 @@ function applyStrings() {
   $('#loginTitle').textContent = t('login_title');
   $('#loginHelp').textContent = t('login_help');
   $('#googleLabel').textContent = t('google_btn');
-  $('#googleMissing').textContent = t('google_missing');
-  $('#devLabel').textContent = t('dev_label');
-  $('#devGo').textContent = t('dev_go');
+  $('#googleOr').querySelector('span').textContent = t('or_google');
+  $('#authTabs').querySelector('[data-mode=login]').textContent = t('tab_login');
+  $('#authTabs').querySelector('[data-mode=signup]').textContent = t('tab_signup');
+  $('#userLabel').textContent = t('user_label');
+  $('#passLabel').textContent = t('pass_label');
+  $('#authHint').textContent = t('signup_hint');
+  $('#authGo').textContent = t(authMode === 'login' ? 'login_go' : 'signup_go');
   $('#q').placeholder = t('search');
   $('#noResults').textContent = t('no_results');
   $('#collapseBtn').title = S.collapsed ? t('expand') : t('collapse');
@@ -853,6 +925,11 @@ function init() {
   graph = new GraphView($('#canvas'), (ref, node) => {
     if (!ref) return closeDetail();
     if (node.level === 'section') openSection(ref.key); else openEntry(ref.id);
+  });
+
+  $('#authForm').addEventListener('submit', submitAuth);
+  $('#authTabs').addEventListener('click', ev => {
+    const b = ev.target.closest('[data-mode]'); if (b) setAuthMode(b.dataset.mode);
   });
 
   $('#collapseBtn').addEventListener('click', () => {

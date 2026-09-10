@@ -20,6 +20,8 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from . import passwords
+
 # Nudge thresholds, per the three rules in the architecture doc.
 STALE_MINUTES = 30
 STALE_EVENTS = 8
@@ -40,7 +42,16 @@ FORMER_MEMBER = "Former member"
 
 
 class Refused(Exception):
-    """An operation the caller is not allowed to do, with a reason a person can read."""
+    """An operation the caller is not allowed to do, with a reason a person can read.
+
+    `code` lets the web show the reason in the reader's language; the English
+    message stays for everything else that only reads text, like the tools.
+    """
+
+    def __init__(self, message: str, code: str | None = None, **params):
+        super().__init__(message)
+        self.code = code
+        self.params = params
 
 
 def _hash(secret: str) -> str:
@@ -152,6 +163,63 @@ def _parse(ts: str) -> datetime:
 
 
 # --- accounts and web sessions ----------------------------------------------------
+
+USERNAME = re.compile(r"^[\w.\-]{3,30}$")
+
+
+def create_account(conn: sqlite3.Connection, username: str, password: str) -> sqlite3.Row:
+    """Sign up. The username is also the name people see.
+
+    Letters in any alphabet are fine -- "Adrià" is a username -- but no spaces,
+    so it can be typed back unambiguously at the sign-in box.
+    """
+    username = (username or "").strip()
+    if not USERNAME.match(username):
+        raise Refused("A username is 3 to 30 letters, numbers, dots, dashes or underscores.",
+                      "e_username_invalid")
+    if len(password or "") < passwords.MIN_LENGTH:
+        raise Refused(f"A password needs at least {passwords.MIN_LENGTH} characters.",
+                      "e_password_short", n=passwords.MIN_LENGTH)
+    taken = conn.execute(
+        "SELECT 1 FROM account WHERE username = ? COLLATE NOCASE", (username,)
+    ).fetchone()
+    if taken:
+        raise Refused("That username is taken.", "e_username_taken")
+    acc_id = conn.execute(
+        "INSERT INTO account (username, password_hash, name) VALUES (?, ?, ?)",
+        (username, passwords.hash_password(password), username),
+    ).lastrowid
+    return conn.execute("SELECT * FROM account WHERE id = ?", (acc_id,)).fetchone()
+
+
+def verify_login(conn: sqlite3.Connection, username: str, password: str) -> sqlite3.Row | None:
+    """The account, if the password matches. The same work is done whether or not
+    the username exists, so a failed sign-in does not reveal which ones are taken."""
+    row = conn.execute(
+        "SELECT * FROM account WHERE username = ? COLLATE NOCASE AND deleted_at IS NULL",
+        ((username or "").strip(),),
+    ).fetchone()
+    ok = passwords.verify(password or "", row["password_hash"] if row else passwords.DUMMY)
+    return row if (row is not None and ok) else None
+
+
+def change_password(conn: sqlite3.Connection, account_id: int, current: str, new: str,
+                    keep_session: str | None = None) -> None:
+    """Change it, and sign out every other browser.
+
+    If the password is being changed because someone else learnt it, leaving
+    their session alive would defeat the point.
+    """
+    row = conn.execute("SELECT password_hash FROM account WHERE id = ?", (account_id,)).fetchone()
+    if row is None or not passwords.verify(current or "", row["password_hash"]):
+        raise Refused("The current password is not right.", "e_bad_current")
+    if len(new or "") < passwords.MIN_LENGTH:
+        raise Refused(f"A password needs at least {passwords.MIN_LENGTH} characters.",
+                      "e_password_short", n=passwords.MIN_LENGTH)
+    conn.execute("UPDATE account SET password_hash = ? WHERE id = ?",
+                 (passwords.hash_password(new), account_id))
+    conn.execute("DELETE FROM session WHERE account_id = ? AND id_hash != ?",
+                 (account_id, _hash(keep_session) if keep_session else ""))
 
 
 def account_from_google(conn: sqlite3.Connection, sub: str, email: str, name: str,
@@ -566,7 +634,8 @@ def delete_account(conn: sqlite3.Connection, account_id: int) -> None:
     if blocking:
         names = ", ".join(f"«{r['title']}»" for r in blocking)
         raise Refused(f"You still own projects other people are in: {names}. "
-                      "Hand them to someone else, or delete them, first.")
+                      "Hand them to someone else, or delete them, first.",
+                      "e_owns_shared", names=names)
 
     solo = [r["workspace_id"] for r in conn.execute(
         """SELECT ms.workspace_id FROM membership ms
@@ -581,9 +650,11 @@ def delete_account(conn: sqlite3.Connection, account_id: int) -> None:
     conn.execute("DELETE FROM session WHERE account_id = ?", (account_id,))
     conn.execute("UPDATE connection SET revoked_at = datetime('now') "
                  "WHERE account_id = ? AND revoked_at IS NULL", (account_id,))
+    # The username is freed for someone else to take. Their entries point at this
+    # row's id, not at the name, so a new "Oscar" is never mistaken for the old.
     conn.execute(
-        "UPDATE account SET google_sub = NULL, email = NULL, picture = NULL, name = ?, "
-        "deleted_at = datetime('now') WHERE id = ?",
+        "UPDATE account SET username = NULL, password_hash = NULL, google_sub = NULL, "
+        "email = NULL, picture = NULL, name = ?, deleted_at = datetime('now') WHERE id = ?",
         (FORMER_MEMBER, account_id),
     )
 

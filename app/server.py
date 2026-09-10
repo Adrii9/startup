@@ -5,7 +5,7 @@ Three surfaces over the same functions in store.py:
   * an MCP server, for Claude and ChatGPT, which speak it natively
   * a plain HTTP/JSON pair of endpoints, for anything that does not -- Gemini
     through its API, a local model, whatever comes next
-  * the web, for people, signed in with Google
+  * the web, for people, signed in with a username and password
 
 The first two authenticate with a connection token from the connector URL. The
 web authenticates with a session. The two never stand in for each other.
@@ -14,11 +14,10 @@ web authenticates with a session. The two never stand in for each other.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
-import os
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -342,37 +341,89 @@ def _is_local(request: Request) -> bool:
     return request.headers.get("host", "").startswith(("127.0.0.1", "localhost"))
 
 
-def _loopback_peer(request: Request) -> bool:
-    """Whether the connection itself comes from this machine.
-
-    The peer address, not the Host header: a header is whatever the client says
-    it is, whereas behind Railway's proxy the peer is never a loopback address.
-    """
-    try:
-        return ipaddress.ip_address(request.client.host).is_loopback
-    except (ValueError, AttributeError):
-        return False
-
-
-def _dev_login_allowed(request: Request) -> bool:
-    """A sign-in without Google, for working on this locally. Two locks, both
-    required: the variable is set, and the request physically comes from this
-    machine. Setting DEV_LOGIN on a public server still cannot open it."""
-    return os.environ.get("DEV_LOGIN") == "1" and _loopback_peer(request)
-
-
-def _start_session(conn, request: Request, account_id: int, to: str) -> RedirectResponse:
-    raw = store.create_session(conn, account_id)
-    resp = RedirectResponse(to, status_code=303)
+def _set_session(resp: Response, request: Request, raw: str) -> Response:
     resp.set_cookie(SESSION, raw, max_age=60 * 60 * 24 * store.SESSION_DAYS, path="/",
                     httponly=True, samesite="lax", secure=not _is_local(request))
     resp.delete_cookie(OAUTH, path="/")
     return resp
 
 
+def _start_session(conn, request: Request, account_id: int, to: str) -> RedirectResponse:
+    return _set_session(RedirectResponse(to, status_code=303), request,
+                        store.create_session(conn, account_id))
+
+
+# Sign-in attempts, kept in memory. Enough for one process, and it resets on a
+# restart, which is fine: this is to stop someone guessing passwords at speed,
+# not to keep a ledger.
+_ATTEMPTS: dict[str, list[float]] = {}
+FAILS_PER_USER = 5         # wrong passwords for one username...
+FAILS_PER_IP = 20          # ...or from one address...
+SIGNUPS_PER_IP = 10        # ...and new accounts from one address
+WINDOW = 15 * 60           # ...per 15 minutes
+
+
+def _client_ip(request: Request) -> str:
+    """The address the proxy saw. Behind Railway every request arrives from the
+    proxy, so the peer is useless on its own; the last X-Forwarded-For hop is the
+    one the proxy appended and the client cannot forge."""
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[-1].strip() if fwd else (request.client.host if request.client else "?")
+
+
+def _over(key: str, limit: int) -> bool:
+    now = time.monotonic()
+    recent = [t for t in _ATTEMPTS.get(key, ()) if now - t < WINDOW]
+    _ATTEMPTS[key] = recent
+    return len(recent) >= limit
+
+
+def _count(key: str) -> None:
+    _ATTEMPTS.setdefault(key, []).append(time.monotonic())
+
+
+TOO_MANY = {"error": "Too many attempts. Wait a few minutes and try again.", "code": "e_too_many"}
+
+
 @mcp.custom_route("/api/config", methods=["GET"])
 async def api_config(request: Request) -> JSONResponse:
-    return JSONResponse({"google": auth.configured(), "dev": _dev_login_allowed(request)})
+    return JSONResponse({"google": auth.configured()})
+
+
+@mcp.custom_route("/auth/signup", methods=["POST"])
+async def auth_signup(request: Request) -> JSONResponse:
+    body = await _body(request)
+    ip = "signup:" + _client_ip(request)
+    if _over(ip, SIGNUPS_PER_IP):
+        return JSONResponse(TOO_MANY, status_code=429)
+    with db.connect() as conn:
+        try:
+            account = store.create_account(conn, body.get("username", ""), body.get("password", ""))
+        except store.Refused as e:
+            return _refused(e)
+        _count(ip)
+        raw = store.create_session(conn, account["id"])
+    return _set_session(JSONResponse({"next": auth.safe_next(body.get("next"))}), request, raw)
+
+
+@mcp.custom_route("/auth/login", methods=["POST"])
+async def auth_login(request: Request) -> JSONResponse:
+    body = await _body(request)
+    user_key = "user:" + (body.get("username") or "").strip().lower()
+    ip_key = "ip:" + _client_ip(request)
+    # Checked before the password, so a locked-out guesser gets no signal at all
+    # about whether a guess would have been right.
+    if _over(user_key, FAILS_PER_USER) or _over(ip_key, FAILS_PER_IP):
+        return JSONResponse(TOO_MANY, status_code=429)
+    with db.connect() as conn:
+        account = store.verify_login(conn, body.get("username", ""), body.get("password", ""))
+        if account is None:
+            _count(user_key)
+            _count(ip_key)
+            return _err("Wrong username or password.", 401, "e_bad_credentials")
+        _ATTEMPTS.pop(user_key, None)
+        raw = store.create_session(conn, account["id"])
+    return _set_session(JSONResponse({"next": auth.safe_next(body.get("next"))}), request, raw)
 
 
 @mcp.custom_route("/auth/google", methods=["GET"])
@@ -418,19 +469,6 @@ async def auth_google_callback(request: Request) -> Response:
         return _start_session(conn, request, account["id"], auth.safe_next(nxt))
 
 
-@mcp.custom_route("/auth/dev", methods=["POST"])
-async def auth_dev(request: Request) -> Response:
-    if not _dev_login_allowed(request):
-        return PlainTextResponse("not found", status_code=404)
-    form = await request.form()
-    name = (form.get("name") or "Dev").strip()
-    with db.connect() as conn:
-        account = store.account_from_google(conn, f"dev:{name.lower()}",
-                                            f"{name.lower()}@dev.local", name)
-        return _start_session(conn, request, account["id"],
-                              auth.safe_next(form.get("next")))
-
-
 @mcp.custom_route("/auth/logout", methods=["POST"])
 async def auth_logout(request: Request) -> JSONResponse:
     with db.connect() as conn:
@@ -449,8 +487,12 @@ def _web_account(conn, request: Request):
     return store.account_for_session(conn, request.cookies.get(SESSION))
 
 
-def _err(msg: str, status: int = 400) -> JSONResponse:
-    return JSONResponse({"error": msg}, status_code=status)
+def _err(msg: str, status: int = 400, code: str | None = None, params: dict | None = None) -> JSONResponse:
+    return JSONResponse({"error": msg, "code": code, "params": params or {}}, status_code=status)
+
+
+def _refused(e: "store.Refused", status: int = 400) -> JSONResponse:
+    return _err(str(e), status, e.code, e.params)
 
 
 async def _body(request: Request) -> dict:
@@ -484,6 +526,21 @@ async def api_me(request: Request) -> JSONResponse:
         })
 
 
+@mcp.custom_route("/api/account/password", methods=["POST"])
+async def api_change_password(request: Request) -> JSONResponse:
+    body = await _body(request)
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            store.change_password(conn, account["id"], body.get("current", ""),
+                                  body.get("new", ""), keep_session=request.cookies.get(SESSION))
+        except store.Refused as e:
+            return _refused(e)
+        return JSONResponse({"ok": True})
+
+
 @mcp.custom_route("/api/account", methods=["DELETE"])
 async def api_delete_account(request: Request) -> JSONResponse:
     with db.connect() as conn:
@@ -493,7 +550,7 @@ async def api_delete_account(request: Request) -> JSONResponse:
         try:
             store.delete_account(conn, account["id"])
         except store.Refused as e:
-            return _err(str(e), 409)
+            return _refused(e, 409)
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(SESSION, path="/")
     return resp
@@ -834,11 +891,8 @@ def build_app():
         purged = store.purge_deleted_projects(conn)
     if purged:
         print(f"purged {purged} project(s) deleted more than {store.TRASH_DAYS} days ago", flush=True)
-    if not auth.configured():
-        print("WARNING: Google sign-in is not configured (GOOGLE_CLIENT_ID, "
-              "GOOGLE_CLIENT_SECRET). Nobody can sign in to the web.", flush=True)
-    if os.environ.get("DEV_LOGIN") == "1":
-        print("DEV_LOGIN is on: sign-in without Google is open to this machine only.", flush=True)
+    if auth.configured():
+        print("Google sign-in is on, alongside usernames and passwords.", flush=True)
     # stateless_http keeps connectors working across redeploys: there is no
     # session for a restart to lose, and we will be redeploying constantly.
     app = mcp.http_app(path="/mcp", stateless_http=True, allowed_hosts=["*"])
