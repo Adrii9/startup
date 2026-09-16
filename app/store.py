@@ -31,7 +31,6 @@ COLLISION_MINUTES = 10
 
 SESSION_DAYS = 30
 INVITE_DAYS = 7
-TRASH_DAYS = 30
 
 KINDS = ("decision", "fact", "question", "work")
 
@@ -722,21 +721,29 @@ def accept_invite(conn: sqlite3.Connection, account_id: int, code: str) -> str:
 
 
 def delete_project(conn: sqlite3.Connection, owner_id: int, slug: str) -> None:
-    """Into the trash for 30 days, restorable by its owner, then gone for good."""
+    """Into the trash, restorable by its owner. Nothing leaves it on a timer.
+
+    A project nobody has looked at for months is still somebody's work, and a
+    clock that deletes it is a clock nobody remembers setting. It stays until
+    its owner says otherwise.
+    """
     ws = _owner_project(conn, owner_id, slug)
     conn.execute("UPDATE workspace SET deleted_at = datetime('now') WHERE id = ?", (ws["id"],))
 
 
 def trash_for(conn: sqlite3.Connection, account_id: int) -> list[dict]:
+    """What the owner threw away, with how much disk each one is still holding --
+    the number you want in front of you when you are deciding what to purge."""
     rows = conn.execute(
-        f"""SELECT w.slug, w.title, w.colour, w.deleted_at,
-                   datetime(w.deleted_at, '+{TRASH_DAYS} days') AS purge_at
-            FROM workspace w JOIN membership ms ON ms.workspace_id = w.id
-            WHERE ms.account_id = ? AND ms.role = 'owner' AND w.deleted_at IS NOT NULL
-            ORDER BY w.deleted_at DESC""",
+        """SELECT w.id, w.slug, w.title, w.colour, w.deleted_at
+           FROM workspace w JOIN membership ms ON ms.workspace_id = w.id
+           WHERE ms.account_id = ? AND ms.role = 'owner' AND w.deleted_at IS NOT NULL
+           ORDER BY w.deleted_at DESC""",
         (account_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [{"slug": r["slug"], "title": r["title"], "colour": r["colour"],
+             "deleted_at": r["deleted_at"], "size": project_bytes(conn, r["id"])}
+            for r in rows]
 
 
 def restore_project(conn: sqlite3.Connection, owner_id: int, slug: str) -> None:
@@ -776,13 +783,21 @@ def _purge_project(conn: sqlite3.Connection, ws_id: int) -> None:
     conn.execute("DELETE FROM workspace WHERE id = ?", (ws_id,))
 
 
-def purge_deleted_projects(conn: sqlite3.Connection) -> int:
-    ids = [r["id"] for r in conn.execute(
-        f"SELECT id FROM workspace WHERE deleted_at < datetime('now', '-{TRASH_DAYS} days')"
-    )]
-    for ws_id in ids:
-        _purge_project(conn, ws_id)
-    return len(ids)
+def purge_project(conn: sqlite3.Connection, owner_id: int, slug: str) -> None:
+    """Empty one project out of the trash, for good. Its owner, on purpose.
+
+    Restoring it has to be impossible afterwards, so this is the one action in
+    the product with no way back -- which is why nothing else triggers it.
+    """
+    row = conn.execute(
+        """SELECT w.id FROM workspace w JOIN membership ms ON ms.workspace_id = w.id
+           WHERE w.slug = ? AND ms.account_id = ? AND ms.role = 'owner'
+             AND w.deleted_at IS NOT NULL""",
+        (slug, owner_id),
+    ).fetchone()
+    if row is None:
+        raise Refused("Nothing in the trash by that name.")
+    _purge_project(conn, row["id"])
 
 
 def delete_account(conn: sqlite3.Connection, account_id: int) -> None:

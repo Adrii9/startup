@@ -433,13 +433,26 @@ def test_a_deleted_project_waits_in_the_trash_and_can_come_back(conn):
     assert [e["summary"] for e in store.snapshot(conn, ws["id"])["events"]] == ["work worth keeping"]
 
 
-def test_after_thirty_days_a_deleted_project_is_gone_for_good(conn):
+def test_nothing_leaves_the_trash_until_its_owner_says_so(conn):
+    """The whole point of the trash is that no clock empties it."""
     a, o, _, ws = team(conn)
     rec(conn, o, ws, summary="doomed", section="intro", content="text", artifact="x.png")
     store.delete_project(conn, a["id"], ws["slug"])
-    conn.execute("UPDATE workspace SET deleted_at = datetime('now', '-31 days')")
+    conn.execute("UPDATE workspace SET deleted_at = datetime('now', '-400 days')")
 
-    assert store.purge_deleted_projects(conn) == 1
+    assert [t["slug"] for t in store.trash_for(conn, a["id"])] == [ws["slug"]]
+    store.restore_project(conn, a["id"], ws["slug"])       # still there a year later
+    assert store.resolve_project(conn, a["id"], ws["slug"]) is not None
+
+
+def test_emptying_one_project_out_of_the_trash_takes_everything_with_it(conn):
+    a, o, _, ws = team(conn)
+    rec(conn, o, ws, summary="doomed", section="intro", content="text", artifact="x.png")
+    store.delete_project(conn, a["id"], ws["slug"])
+
+    with pytest.raises(store.Refused):
+        store.purge_project(conn, o["id"], ws["slug"])     # a member cannot, only the owner
+    store.purge_project(conn, a["id"], ws["slug"])
     for table in ("workspace", "event", "section", "section_revision", "artifact",
                   "membership", "invite", "cursor"):
         assert conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] == 0, table
@@ -742,8 +755,8 @@ def test_purging_a_project_takes_its_files_with_it(conn):
     a, _, _, ws = team(conn)
     upload(conn, a, as_member(conn, a, ws), "doomed.txt", b"bytes")
     store.delete_project(conn, a["id"], ws["slug"])
-    conn.execute("UPDATE workspace SET deleted_at = datetime('now', '-31 days')")
-    store.purge_deleted_projects(conn)
+    assert store.trash_for(conn, a["id"])[0]["size"] == 5    # says what it is holding
+    store.purge_project(conn, a["id"], ws["slug"])
     assert conn.execute("SELECT COUNT(*) AS n FROM file").fetchone()["n"] == 0
     assert list((db.files_dir() / str(ws["id"])).iterdir()) == []
 

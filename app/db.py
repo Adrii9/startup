@@ -1,8 +1,9 @@
 """SQLite schema and connections.
 
 The `event` table is append-only: never UPDATE, never DELETE. It is the single
-source of truth for a project. The one exception is a project its owner deleted
-more than 30 days ago, which is purged whole -- see store.purge_deleted_projects.
+source of truth for a project. The one exception is a project its owner threw
+away and then emptied out of the trash on purpose -- see store.purge_project.
+Nothing here is ever deleted on a timer.
 
 Two credentials, deliberately separate:
 

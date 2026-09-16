@@ -126,9 +126,11 @@ const STRINGS = {
     ps_member_only: "Només el propietari pot convidar gent, treure'n o esborrar el projecte.",
     t_deleted: '«{n}» és a la paperera.', t_left: 'Has marxat de «{n}».',
 
-    tr_title: 'Paperera', tr_help: 'Els projectes que has esborrat. Passats 30 dies, desapareixen per sempre.',
-    tr_empty: 'La paperera és buida.', tr_restore: 'Recuperar', tr_purge_on: "s'esborrarà {d}",
-    t_restored: '«{n}» recuperat.',
+    tr_title: 'Paperera', tr_help: "Els projectes que has esborrat. No marxen sols: es queden aquí fins que els treguis tu.",
+    tr_empty: 'La paperera és buida.', tr_restore: 'Recuperar', tr_deleted_on: 'esborrat el {d}',
+    tr_purge: 'Esborrar per sempre', tr_purge_q: 'Esborrar «{n}» per sempre?',
+    tr_purge_body: "Desapareix tot: les entrades, el document i els fitxers. Això no es pot desfer.",
+    t_restored: '«{n}» recuperat.', t_purged: '«{n}» esborrat per sempre.',
 
     da_title: 'Esborrar el compte',
     da_body: "Es tancarà la teva sessió i es revocaran totes les teves connexions. Els projectes on només hi ets tu s'esborraran. On hi ha més gent, el que has escrit es quedarà com a d'un «antic membre».\n\nNo es pot desfer.",
@@ -256,9 +258,11 @@ const STRINGS = {
     ps_member_only: 'Solo el propietario puede invitar gente, quitarla o borrar el proyecto.',
     t_deleted: '«{n}» está en la papelera.', t_left: 'Has salido de «{n}».',
 
-    tr_title: 'Papelera', tr_help: 'Los proyectos que has borrado. Pasados 30 días, desaparecen para siempre.',
-    tr_empty: 'La papelera está vacía.', tr_restore: 'Recuperar', tr_purge_on: 'se borrará {d}',
-    t_restored: '«{n}» recuperado.',
+    tr_title: 'Papelera', tr_help: 'Los proyectos que has borrado. No se van solos: se quedan aquí hasta que los saques tú.',
+    tr_empty: 'La papelera está vacía.', tr_restore: 'Recuperar', tr_deleted_on: 'borrado el {d}',
+    tr_purge: 'Borrar para siempre', tr_purge_q: '¿Borrar «{n}» para siempre?',
+    tr_purge_body: 'Desaparece todo: las entradas, el documento y los archivos. Esto no se puede deshacer.',
+    t_restored: '«{n}» recuperado.', t_purged: '«{n}» borrado para siempre.',
 
     da_title: 'Borrar la cuenta',
     da_body: 'Se cerrará tu sesión y se revocarán todas tus conexiones. Los proyectos en los que solo estás tú se borrarán. Donde hay más gente, lo que has escrito quedará como de un «antiguo miembro».\n\nNo se puede deshacer.',
@@ -386,9 +390,11 @@ const STRINGS = {
     ps_member_only: 'Only the owner can invite people, remove them, or delete the project.',
     t_deleted: '“{n}” is in the trash.', t_left: 'You left “{n}”.',
 
-    tr_title: 'Trash', tr_help: 'Projects you deleted. After 30 days they are gone for good.',
-    tr_empty: 'The trash is empty.', tr_restore: 'Restore', tr_purge_on: 'deleted for good {d}',
-    t_restored: '“{n}” restored.',
+    tr_title: 'Trash', tr_help: 'Projects you deleted. Nothing leaves on its own: they stay until you take them out.',
+    tr_empty: 'The trash is empty.', tr_restore: 'Restore', tr_deleted_on: 'deleted {d}',
+    tr_purge: 'Delete for good', tr_purge_q: 'Delete “{n}” for good?',
+    tr_purge_body: 'Everything goes: the entries, the document and the files. This cannot be undone.',
+    t_restored: '“{n}” restored.', t_purged: '“{n}” deleted for good.',
 
     da_title: 'Delete account',
     da_body: 'Your session ends and every connection you made is revoked. Projects with only you in them are deleted. Where other people are, what you wrote stays, attributed to a “former member”.\n\nThis cannot be undone.',

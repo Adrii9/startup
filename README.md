@@ -98,10 +98,13 @@ project's history and other people's decisions build on them. They lose access
 immediately — including a page they have open, which is told to leave — and
 their entries stay under their name.
 
-**Deleting a project** puts it in the owner's trash for 30 days, restorable,
-then purges it whole. That purge is the one place anything in a log is ever
-deleted: append-only means history is not rewritten, not that nobody may delete
-their own project.
+**Deleting a project** puts it in the owner's trash, restorable, and leaves it
+there. Nothing in this product deletes anything on a timer: a project nobody has
+opened in months is still somebody's work, and a clock that quietly removes it is
+a clock nobody remembers setting. The trash says how much disk each project is
+still holding, and emptying one out is a button its owner presses. That purge is
+the one place anything in a log is ever deleted — append-only means history is
+not rewritten, not that nobody may delete their own project.
 
 **Deleting an account** is refused while it owns projects other people are in —
 those have to be handed over or deleted first, rather than silently orphaned.

@@ -868,15 +868,29 @@ async function openTrash() {
     const main = el('div', 'item-main person-main');
     const bead = el('span', 'bead small', initials(p.title)); bead.style.setProperty('--c', p.colour);
     const nm = el('div');
-    nm.append(el('b', null, p.title), el('span', 'item-sub', t('tr_purge_on', { d: fmtDay(p.purge_at) })));
+    // What it is still holding, so there is a number in front of you when you
+    // are deciding what to empty out.
+    const sub = t('tr_deleted_on', { d: fmtDay(p.deleted_at) }) +
+                (p.size ? ' · ' + sizeOf(p.size) : '');
+    nm.append(el('b', null, p.title), el('span', 'item-sub', sub));
     main.append(bead, nm);
-    r.append(main, btn('ghost-btn small', t('tr_restore'), async () => {
+    const acts = el('div', 'item-acts');
+    acts.append(btn('ghost-btn small', t('tr_restore'), async () => {
       await api(`/api/projects/${encodeURIComponent(p.slug)}/restore`, { method: 'POST' });
       closeSheet();
       await refreshMe();
       selectProject(p.slug);
       toast(t('t_restored', { n: p.title }));
     }));
+    acts.append(btn('ghost-btn small danger-text', t('tr_purge'), async () => {
+      if (await confirmSheet({ title: t('tr_purge_q', { n: p.title }), body: t('tr_purge_body'),
+                               action: t('tr_purge') })) {
+        await api(`/api/trash/${encodeURIComponent(p.slug)}`, { method: 'DELETE' });
+        toast(t('t_purged', { n: p.title }));
+      }
+      openTrash();
+    }));
+    r.append(main, acts);
     list.append(r);
   }
   openSheet({ title: t('tr_title'), body: [el('p', 'sheet-text', t('tr_help')), list],

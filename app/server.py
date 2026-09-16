@@ -557,7 +557,6 @@ async def _body(request: Request) -> dict:
 @mcp.custom_route("/api/me", methods=["GET"])
 async def api_me(request: Request) -> JSONResponse:
     with db.connect() as conn:
-        store.purge_deleted_projects(conn)
         account = _web_account(conn, request)
         if account is None:
             return JSONResponse(NOT_SIGNED_IN, status_code=401)
@@ -679,6 +678,21 @@ async def api_restore(request: Request) -> JSONResponse:
             return JSONResponse(NOT_SIGNED_IN, status_code=401)
         try:
             store.restore_project(conn, account["id"], request.path_params["slug"])
+        except store.Refused as e:
+            return _err(str(e), 404)
+        return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/trash/{slug}", methods=["DELETE"])
+async def api_purge(request: Request) -> JSONResponse:
+    """Delete one project out of the trash for good. Nothing else in the product
+    removes a project's history, and nothing does it on a schedule."""
+    with db.connect() as conn:
+        account = _web_account(conn, request)
+        if account is None:
+            return JSONResponse(NOT_SIGNED_IN, status_code=401)
+        try:
+            store.purge_project(conn, account["id"], request.path_params["slug"])
         except store.Refused as e:
             return _err(str(e), 404)
         return JSONResponse({"ok": True})
@@ -1066,10 +1080,6 @@ def _apply_password_reset() -> None:
 def build_app():
     db.init_db()
     _apply_password_reset()
-    with db.connect() as conn:
-        purged = store.purge_deleted_projects(conn)
-    if purged:
-        print(f"purged {purged} project(s) deleted more than {store.TRASH_DAYS} days ago", flush=True)
     if auth.configured():
         print("Google sign-in is on, alongside usernames and passwords.", flush=True)
     # stateless_http keeps connectors working across redeploys: there is no
