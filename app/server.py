@@ -503,9 +503,25 @@ async def healthz(request: Request) -> JSONResponse:
         "db_bytes": db.DB_PATH.stat().st_size if db.DB_PATH.exists() else 0,
         "starts": seen["n"],
         "first_start": seen["first"],
-        "verdict": ("data is being kept" if seen["n"] > 1 else
-                    "nothing has survived a restart yet -- deploy again and look here"),
+        "verdict": _verdict(mount, seen["n"]),
     })
+
+
+def _verdict(mount: str | None, starts: int) -> str:
+    """The endpoint has every fact needed to name the cause, so it should name it
+    rather than leave someone to work it out from three fields."""
+    if not mount:
+        return ("No volume is mounted on this service, so every deploy starts from an "
+                "empty database. Attach one and mount it at /data.")
+    if not str(db.DB_PATH).startswith(mount.rstrip("/") + "/"):
+        return (f"A volume is mounted at {mount}, but the database is at {db.DB_PATH}, "
+                f"outside it -- so every deploy wipes it. Something is pointing the app "
+                f"somewhere else: remove the WORKSPACE_DB variable, or set it to "
+                f"{mount.rstrip('/')}/workspace.db.")
+    if starts <= 1:
+        return ("On the volume, on its first start. Deploy once more and check this "
+                "count goes up -- that is the proof the data is being kept.")
+    return f"Data is being kept: this database has survived {starts} starts."
 
 
 @mcp.custom_route("/api/config", methods=["GET"])
