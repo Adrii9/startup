@@ -177,6 +177,15 @@ input,select{font:inherit;color:inherit}
 .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:26px}
 .col{min-width:0}
 
+/* Files and repositories sit under the document, in the same column: they are
+   what the project is about, not a separate place to go looking. */
+.col-head{display:flex;align-items:center;gap:10px;margin:26px 0 10px}
+.col-head .rubric{margin:0}
+#lblRepos{margin-top:26px}
+#filesCol,#reposCol{display:flex;flex-direction:column;gap:6px}
+.file-main{text-decoration:none;color:inherit}
+.file-main:hover b{text-decoration:underline}
+
 .doc{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px;cursor:pointer;transition:.12s}
 .doc:hover{border-color:var(--line2)}
 .doc h3{margin:0 0 6px;font-size:14px;font-weight:650}

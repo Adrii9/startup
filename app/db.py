@@ -41,6 +41,13 @@ def _db_path() -> Path:
 
 DB_PATH = _db_path()
 
+
+def files_dir() -> Path:
+    """Uploaded bytes sit beside the database, so they are on the same volume and
+    a backup of one is a backup of the other. Derived on each call rather than
+    fixed at import, so it follows DB_PATH wherever that points."""
+    return DB_PATH.parent / "files"
+
 SCHEMA = """
 -- A person. They sign up with a username and a password; Google sign-in is
 -- supported too but only switched on when its credentials are configured.
@@ -163,6 +170,39 @@ CREATE TABLE IF NOT EXISTS artifact (
     caption      TEXT
 );
 
+-- Uploaded files. The bytes live beside the database, on the same volume; only
+-- what is needed to find and describe them is in here, plus the text pulled out
+-- at upload so an assistant never waits on a PDF parser.
+CREATE TABLE IF NOT EXISTS file (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id),
+    seq          INTEGER NOT NULL,
+    account_id   INTEGER NOT NULL REFERENCES account(id),
+    name         TEXT NOT NULL,
+    mime         TEXT NOT NULL,
+    size         INTEGER NOT NULL,
+    sha256       TEXT NOT NULL,
+    stored       TEXT NOT NULL,
+    text         TEXT,
+    state        TEXT NOT NULL DEFAULT 'binary',
+    note         TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (workspace_id, seq)
+);
+
+-- A repository the project is about. Deliberately a reference and not a copy:
+-- every assistant already has its own GitHub connector, and a mirror of ours
+-- would only ever be a staler version of what they can already read.
+CREATE TABLE IF NOT EXISTS repo (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id),
+    url          TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    branch       TEXT,
+    account_id   INTEGER NOT NULL REFERENCES account(id),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Per person AND per project: catching up in one must never mark another read.
 CREATE TABLE IF NOT EXISTS cursor (
     account_id    INTEGER NOT NULL REFERENCES account(id),
@@ -221,6 +261,7 @@ def init_db() -> None:
     # SQLite will not create the directory for us, and a host's mounted volume
     # may hand us an empty path. Crashing on a missing folder helps nobody.
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    files_dir().mkdir(parents=True, exist_ok=True)
     print(f"Database: {DB_PATH}", flush=True)
 
     mount = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")

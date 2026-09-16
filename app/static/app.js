@@ -414,6 +414,9 @@ function renderBoard() {
     doc.append(d);
   }
 
+  renderFiles();
+  renderRepos();
+
   const feed = $('#feedCol');
   feed.textContent = '';
   const list = st.events.slice().sort((a, b) => b.id - a.id);
@@ -447,6 +450,75 @@ function renderBoard() {
     if (e.artifact_url) card.append(el('div', 'art', '📎 ' + e.artifact_url));
     card.addEventListener('click', () => openEntry(e.id));
     feed.append(card);
+  }
+}
+
+/* ── files ────────────────────────────────────────────────────────── */
+const sizeOf = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, n >> 10) + ' KB';
+
+function renderFiles() {
+  const box = $('#filesCol');
+  box.textContent = '';
+  const files = S.state.files || [];
+  if (!files.length) { box.append(el('p', 'empty', t('no_files'))); return; }
+  for (const f of files) {
+    const row = el('div', 'item-row file-row');
+    const main = el('a', 'item-main file-main');
+    main.href = `/f/${encodeURIComponent(S.slug)}/${f.id}`;
+    main.target = '_blank'; main.rel = 'noopener';
+    main.append(el('b', null, f.name));
+    main.append(el('span', 'item-sub',
+      `${t('f_' + (f.state.startsWith('error') ? 'error' : f.state))} · ${sizeOf(f.size)} · ` +
+      t('f_added_by', { n: f.member_name })));
+    if (f.note) main.append(el('span', 'item-sub', f.note));
+    const acts = el('div', 'item-acts');
+    acts.append(btn('ghost-btn small danger-text', t('f_delete'), async ev => {
+      ev.preventDefault();
+      if (!await confirmSheet({ title: t('f_delete_q', { n: f.name }), body: t('f_delete_body'),
+                                action: t('f_delete') })) return;
+      await api(`/api/projects/${encodeURIComponent(S.slug)}/files/${f.id}`, { method: 'DELETE' });
+      toast(t('t_file_deleted', { n: f.name }));
+    }));
+    row.append(main, acts);
+    box.append(row);
+  }
+}
+
+async function uploadFiles(list) {
+  const span = $('#uploadBtn').querySelector('span');
+  span.textContent = t('f_uploading');
+  try {
+    for (const file of list) {
+      const body = new FormData();
+      body.append('file', file);
+      const r = await fetch(`/api/projects/${encodeURIComponent(S.slug)}/files`,
+                            { method: 'POST', body });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toast(errMsg({ message: data.error || r.statusText, code: data.code, params: data.params }));
+        break;
+      }
+      toast(t('t_uploaded', { n: file.name }));
+    }
+  } finally {
+    span.textContent = t('f_upload');
+  }
+}
+
+/* ── linked repositories ──────────────────────────────────────────── */
+function renderRepos() {
+  const box = $('#reposCol');
+  box.textContent = '';
+  const repos = S.state.repos || [];
+  if (!repos.length) { box.append(el('p', 'empty', t('no_repos'))); return; }
+  for (const r of repos) {
+    const row = el('div', 'item-row');
+    const main = el('a', 'item-main file-main');
+    main.href = r.url; main.target = '_blank'; main.rel = 'noopener noreferrer';
+    main.append(el('b', null, r.label + (r.branch ? ' · ' + r.branch : '')));
+    main.append(el('span', 'item-sub', r.url));
+    row.append(main);
+    box.append(row);
   }
 }
 
@@ -722,6 +794,46 @@ async function openSettings() {
     body.push(el('p', 'sheet-note', t('ps_member_only')));
   }
 
+  // Repositories: a link the whole team shares, not a copy we keep.
+  body.push(el('h4', 'rubric', t('repos')));
+  body.push(el('p', 'sheet-note', t('repo_note')));
+  const { repos } = await api(`/api/projects/${slug}/repos`);
+  const rlist = el('div', 'rows');
+  if (!repos.length) rlist.append(el('p', 'empty', t('no_repos')));
+  for (const rp of repos) {
+    const r = el('div', 'item-row');
+    const main = el('div', 'item-main');
+    main.append(el('b', null, rp.label + (rp.branch ? ' · ' + rp.branch : '')));
+    main.append(el('span', 'item-sub', rp.url));
+    r.append(main);
+    if (owner) {
+      const acts = el('div', 'item-acts');
+      acts.append(btn('ghost-btn small danger-text', t('repo_remove'), async () => {
+        await api(`/api/projects/${slug}/repos/${rp.id}`, { method: 'DELETE' });
+        openSettings();
+      }));
+      r.append(acts);
+    }
+    rlist.append(r);
+  }
+  body.push(rlist);
+
+  const rurl = el('input'); rurl.placeholder = 'https://github.com/owner/repo';
+  rurl.autocapitalize = 'off'; rurl.spellcheck = false;
+  const rbranch = el('input'); rbranch.maxLength = 100;
+  const rerr = el('p', 'login-err'); rerr.hidden = true;
+  const radd = el('div', 'settings-top');
+  radd.append(field(t('repo_url'), rurl), field(t('repo_branch'), rbranch),
+              btn('primary-btn small', t('repo_add'), async () => {
+                try {
+                  await api(`/api/projects/${slug}/repos`,
+                            { method: 'POST', body: { url: rurl.value, branch: rbranch.value } });
+                  toast(t('t_repo_added'));
+                  openSettings();
+                } catch (e) { rerr.textContent = errMsg(e); rerr.hidden = false; }
+              }));
+  body.push(radd, rerr);
+
   const danger = el('div', 'danger');
   if (owner) {
     danger.append(el('span', null, t('ps_danger')), btn('danger-btn', t('ps_delete'), async () => {
@@ -838,6 +950,9 @@ function applyStrings() {
   $('#lblStand').textContent = t('stand');
   $('#lblDoc').textContent = t('document');
   $('#lblFeed').textContent = t('feed');
+  $('#lblFiles').textContent = t('files');
+  $('#lblRepos').textContent = t('repos');
+  $('#uploadBtn').querySelector('span').textContent = t('f_upload');
   $('#langLabel').textContent = LANG.toUpperCase();
   $('#detailClose').title = t('d_close');
   $('#graphHint').textContent = t(S.dim === 3 ? 'graph_hint_3d' : 'graph_hint_2d');
@@ -944,6 +1059,13 @@ function init() {
   $('#emptyNew').addEventListener('click', openNewProject);
   $('#linkBtn').addEventListener('click', openLink);
   $('#settingsBtn').addEventListener('click', openSettings);
+
+  $('#uploadBtn').addEventListener('click', () => $('#fileInput').click());
+  $('#fileInput').addEventListener('change', async ev => {
+    const picked = [...ev.target.files];
+    ev.target.value = '';           // so picking the same file twice still fires
+    if (picked.length) await uploadFiles(picked);
+  });
 
   $('#accountBtn').addEventListener('click', ev => {
     ev.stopPropagation();

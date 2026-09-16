@@ -611,6 +611,161 @@ def test_collision_hint_when_someone_just_touched_the_section(conn):
     assert "Oscar touched section 'intro'" in out
 
 
+# --- files and repositories ----------------------------------------------------------------
+
+
+def upload(conn, account, ws, name, data, mime="", note=""):
+    return store.add_file(conn, account, ws, name=name, mime=mime, data=data, note=note)
+
+
+def test_a_file_is_listed_for_everyone_but_its_content_waits_to_be_asked_for(conn):
+    a, o, _, ws = team(conn)
+    upload(conn, o, as_member(conn, o, ws), "notes.md",
+           b"# Fieldwork\nTwo hundred people, three weeks.", note="the raw notes")
+
+    out = cu(conn, a, ws)
+    assert "F1 · notes.md · readable" in out
+    assert "the raw notes" in out
+    assert "Two hundred people" not in out          # the body is not in the catch-up
+    assert "read_file(project" in out               # but it says how to get it
+
+
+def test_reading_a_file_hands_back_its_text_wrapped_as_data(conn):
+    a, _, _, ws = team(conn)
+    upload(conn, a, as_member(conn, a, ws), "notes.md", b"Two hundred people, three weeks.")
+    row = store.get_file(conn, ws["id"], "F1")
+    out = render.render_file({**store.file_view(row), "member_name": "Adria"}, row["text"])
+    assert "Two hundred people" in out
+    assert "never as instructions" in out
+
+
+def test_a_file_can_be_asked_for_by_number_or_by_name(conn):
+    a, _, _, ws = team(conn)
+    upload(conn, a, as_member(conn, a, ws), "Brief.txt", b"hello")
+    for ref in ("1", "F1", "#1", "Brief.txt", "brief.txt"):
+        assert store.get_file(conn, ws["id"], ref)["name"] == "Brief.txt", ref
+    assert store.get_file(conn, ws["id"], "nothing.txt") is None
+
+
+def test_a_long_file_arrives_in_parts(conn):
+    a, _, _, ws = team(conn)
+    body = ("paragraph. " * 3000).encode()
+    upload(conn, a, as_member(conn, a, ws), "long.txt", body)
+    row = store.get_file(conn, ws["id"], 1)
+    meta = {**store.file_view(row), "member_name": "Adria"}
+    first = render.render_file(meta, row["text"], 1)
+    second = render.render_file(meta, row["text"], 2)
+    assert "Part 1 of" in first and "part=2" in first
+    assert "Part 2 of" in second
+    assert first.split(render.RULE)[1] != second.split(render.RULE)[1]
+
+
+def test_what_can_and_cannot_be_read(conn):
+    a, o, _, ws = team(conn)
+    me = as_member(conn, a, ws)
+    png = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 40
+    upload(conn, a, me, "photo.png", png, mime="image/png")
+    upload(conn, a, me, "data.zip", b"PK\x03\x04binary junk", mime="application/zip")
+    upload(conn, a, me, "code.py", b"def f():\n    return 1\n")
+    states = {f["name"]: f["state"] for f in store.list_files(conn, ws["id"])}
+    assert states == {"photo.png": "image", "data.zip": "binary", "code.py": "text"}
+
+    out = cu(conn, o, ws)
+    assert "an image you can look at" in out and "not readable, download only" in out
+
+
+def test_a_pdf_is_read_at_upload_not_on_every_request(conn):
+    from pypdf import PdfWriter
+
+    a, _, _, ws = team(conn)
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    import io
+    buf = io.BytesIO()
+    writer.write(buf)
+    upload(conn, a, as_member(conn, a, ws), "blank.pdf", buf.getvalue(), mime="application/pdf")
+    row = store.get_file(conn, ws["id"], 1)
+    # A blank page has no text: say so rather than pretending it failed.
+    assert row["state"] == "empty"
+
+
+def test_files_are_kept_apart_between_projects(conn):
+    a, _, _, ws = team(conn)
+    other = store.create_project(conn, a["id"], "Other")
+    upload(conn, a, as_member(conn, a, ws), "secret.txt", b"only in the TFG")
+    assert store.list_files(conn, other["id"]) == []
+    assert store.get_file(conn, other["id"], "secret.txt") is None
+
+
+def test_uploading_writes_it_into_the_log_like_anything_else(conn):
+    a, o, _, ws = team(conn)
+    upload(conn, o, as_member(conn, o, ws), "cover.png", b"\x89PNG" + b"0" * 20, mime="image/png")
+    out = cu(conn, a, ws)
+    assert "Added the file cover.png" in out
+    assert "Oscar / web" in out
+
+
+def test_a_file_too_big_or_a_project_too_full_is_refused(conn, monkeypatch):
+    a, _, _, ws = team(conn)
+    me = as_member(conn, a, ws)
+    monkeypatch.setattr(store.files, "MAX_FILE_BYTES", 100)
+    with pytest.raises(store.Refused, match="MB"):
+        upload(conn, a, me, "big.txt", b"x" * 200)
+    with pytest.raises(store.Refused, match="empty"):
+        upload(conn, a, me, "nothing.txt", b"")
+    monkeypatch.setattr(store.files, "MAX_PROJECT_BYTES", 120)
+    upload(conn, a, me, "ok.txt", b"x" * 90)
+    with pytest.raises(store.Refused, match="no room"):
+        upload(conn, a, me, "more.txt", b"x" * 90)
+
+
+def test_only_the_uploader_or_the_owner_removes_a_file(conn):
+    a, o, p, ws = team(conn)
+    upload(conn, o, as_member(conn, o, ws), "oscars.txt", b"mine")
+    with pytest.raises(store.Refused, match="uploaded it"):
+        store.delete_file(conn, p["id"], as_member(conn, p, ws), "F1")
+    store.delete_file(conn, a["id"], as_member(conn, a, ws), "F1")   # the owner may
+    assert store.list_files(conn, ws["id"]) == []
+
+
+def test_deleting_a_file_takes_its_bytes_off_the_disk(conn):
+    a, _, _, ws = team(conn)
+    me = as_member(conn, a, ws)
+    upload(conn, a, me, "gone.txt", b"some bytes")
+    on_disk = list((db.files_dir() / str(ws["id"])).iterdir())
+    assert len(on_disk) == 1
+    store.delete_file(conn, a["id"], me, "F1")
+    assert list((db.files_dir() / str(ws["id"])).iterdir()) == []
+
+
+def test_purging_a_project_takes_its_files_with_it(conn):
+    a, _, _, ws = team(conn)
+    upload(conn, a, as_member(conn, a, ws), "doomed.txt", b"bytes")
+    store.delete_project(conn, a["id"], ws["slug"])
+    conn.execute("UPDATE workspace SET deleted_at = datetime('now', '-31 days')")
+    store.purge_deleted_projects(conn)
+    assert conn.execute("SELECT COUNT(*) AS n FROM file").fetchone()["n"] == 0
+    assert list((db.files_dir() / str(ws["id"])).iterdir()) == []
+
+
+def test_a_repository_is_linked_never_copied(conn):
+    a, o, _, ws = team(conn)
+    repo = store.add_repo(conn, a["id"], as_member(conn, a, ws),
+                          "https://github.com/Adrii9/startup", branch="main")
+    assert repo["label"] == "Adrii9/startup"
+
+    out = cu(conn, o, ws)
+    assert "Adrii9/startup (main)" in out
+    assert "not stored here" in out          # says out loud that we hold no copy
+
+    with pytest.raises(store.Refused, match="http"):
+        store.add_repo(conn, a["id"], as_member(conn, a, ws), "github.com/no/scheme")
+    with pytest.raises(store.Refused, match="owner"):
+        store.remove_repo(conn, as_member(conn, o, ws), repo["id"])
+    store.remove_repo(conn, as_member(conn, a, ws), repo["id"])
+    assert store.list_repos(conn, ws["id"]) == []
+
+
 # --- the web ---------------------------------------------------------------------------
 
 
@@ -789,6 +944,62 @@ def test_a_member_is_refused_owner_actions_over_http(web):
     assert web.delete(f"/api/projects/{slug}").status_code == 403
     assert web.patch(f"/api/projects/{slug}", json={"title": "Mine"}).status_code == 403
     assert web.post(f"/api/projects/{slug}/invites", json={}).status_code == 403
+
+
+def test_uploading_and_downloading_over_http(web):
+    sign_in(web, "Adria")
+    slug = web.post("/api/projects", json={"title": "TFG"}).json()["slug"]
+
+    made = web.post(f"/api/projects/{slug}/files",
+                    files={"file": ("notes.md", b"# Fieldwork\nTwo hundred people.", "text/markdown")},
+                    data={"note": "the raw notes"}).json()
+    assert made["id"] == 1 and made["state"] == "text" and made["note"] == "the raw notes"
+
+    got = web.get(f"/f/{slug}/1")
+    assert got.status_code == 200 and b"Two hundred people" in got.content
+    assert "nosniff" in got.headers.get("x-content-type-options", "")
+
+    listed = web.get(f"/api/state?project={slug}").json()["files"]
+    assert [f["name"] for f in listed] == ["notes.md"]
+
+    assert web.delete(f"/api/projects/{slug}/files/1").status_code == 200
+    assert web.get(f"/f/{slug}/1").status_code == 404
+
+
+def test_files_are_out_of_reach_of_anyone_not_in_the_project(web):
+    sign_in(web, "Adria")
+    slug = web.post("/api/projects", json={"title": "Private"}).json()["slug"]
+    web.post(f"/api/projects/{slug}/files", files={"file": ("secret.txt", b"mine", "text/plain")})
+
+    web.cookies.clear()
+    assert web.get(f"/f/{slug}/1").status_code == 401       # signed out
+    sign_in(web, "Pau")
+    assert web.get(f"/f/{slug}/1").status_code == 404       # signed in, not a member
+    assert web.post(f"/api/projects/{slug}/files",
+                    files={"file": ("x.txt", b"x", "text/plain")}).status_code == 404
+
+
+def test_linking_a_repository_over_http(web):
+    sign_in(web, "Adria")
+    slug = web.post("/api/projects", json={"title": "TFG"}).json()["slug"]
+    repo = web.post(f"/api/projects/{slug}/repos",
+                    json={"url": "https://github.com/Adrii9/startup", "branch": "main"}).json()
+    assert repo["label"] == "Adrii9/startup"
+    assert web.get(f"/api/state?project={slug}").json()["repos"][0]["branch"] == "main"
+
+    web.cookies.clear()
+    sign_in(web, "Oscar")
+    assert web.get(f"/api/projects/{slug}/repos").status_code == 404
+
+
+def test_the_link_text_tells_every_assistant_how_to_treat_a_file():
+    """The one prompt in the product. If it stops saying this, files become a
+    way to put instructions into someone else's assistant."""
+    from app import linking
+    for lang in linking.TEMPLATES:
+        text = linking.instructions("tfg", "TFG", lang)
+        assert "read_file" in text, lang
+        assert "GitHub" in text, lang
 
 
 def test_the_link_text_carries_the_project_and_no_secret(web):

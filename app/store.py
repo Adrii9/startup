@@ -20,7 +20,9 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-from . import passwords
+from pathlib import Path
+
+from . import db, files, passwords
 
 # Nudge thresholds, per the three rules in the architecture doc.
 STALE_MINUTES = 30
@@ -150,6 +152,8 @@ class Envelope:
     new_events: list[EventView] = field(default_factory=list)
     document: list[SectionView] | None = None
     brief: Brief | None = None
+    files: list[dict] | None = None
+    repos: list[dict] | None = None
     hints: list[str] = field(default_factory=list)
     state: dict = field(default_factory=dict)
 
@@ -507,6 +511,138 @@ def unread_for(conn: sqlite3.Connection, account_id: int, ws_id: int) -> int:
     ).fetchone()["n"]
 
 
+# --- files and repositories -----------------------------------------------------------
+
+
+def project_bytes(conn: sqlite3.Connection, ws_id: int) -> int:
+    return conn.execute(
+        "SELECT COALESCE(SUM(size), 0) AS n FROM file WHERE workspace_id = ?", (ws_id,)
+    ).fetchone()["n"]
+
+
+def add_file(conn: sqlite3.Connection, account: sqlite3.Row, ws: sqlite3.Row, *,
+             name: str, mime: str, data: bytes, note: str = "") -> dict:
+    """Store an upload, pull out whatever text is in it, and tell the team.
+
+    The text is extracted now rather than on every read: an assistant asking for
+    a document should not be made to wait on a PDF parser.
+    """
+    name = files.safe_name(name)
+    if not data:
+        raise Refused("That file is empty.")
+    if len(data) > files.MAX_FILE_BYTES:
+        raise Refused(f"Files go up to {files.MAX_FILE_BYTES // (1024 * 1024)} MB.",
+                      "e_file_too_big", mb=files.MAX_FILE_BYTES // (1024 * 1024))
+    if project_bytes(conn, ws["id"]) + len(data) > files.MAX_PROJECT_BYTES:
+        raise Refused("This project has no room left for more files.", "e_project_full")
+
+    mime = files.guess_mime(name, mime)
+    sha = files.digest(data)
+    folder = db.files_dir() / str(ws["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    stored = f"{sha[:16]}{Path(name).suffix.lower()[:12]}"
+    path = folder / stored
+    path.write_bytes(data)
+    text, state = files.extract(path, name, mime)
+
+    file_id = conn.execute(
+        """INSERT INTO file (workspace_id, seq, account_id, name, mime, size, sha256,
+                             stored, text, state, note)
+           VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM file WHERE workspace_id = ?),
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (ws["id"], ws["id"], account["id"], name, mime, len(data), sha, stored,
+         text or None, state, note.strip()[:200] or None),
+    ).lastrowid
+    row = conn.execute("SELECT * FROM file WHERE id = ?", (file_id,)).fetchone()
+
+    # An upload is news, so it goes through the log like anything else. Nothing
+    # else in the product gets to write history behind the team's back either.
+    record(conn, account, ws, agent="web", summary=f"Added the file {name}",
+           details=note.strip()[:200], artifact=name)
+    return file_view(row)
+
+
+def file_view(row: sqlite3.Row) -> dict:
+    return {"id": row["seq"], "name": row["name"], "mime": row["mime"], "size": row["size"],
+            "state": row["state"], "note": row["note"], "created_at": row["created_at"]}
+
+
+def list_files(conn: sqlite3.Connection, ws_id: int) -> list[dict]:
+    """Metadata only. The text stays where it is until somebody asks for it."""
+    rows = conn.execute(
+        """SELECT f.*, a.name AS member_name FROM file f JOIN account a ON a.id = f.account_id
+           WHERE f.workspace_id = ? ORDER BY f.seq""",
+        (ws_id,),
+    ).fetchall()
+    return [{**file_view(r), "member_name": r["member_name"]} for r in rows]
+
+
+def get_file(conn: sqlite3.Connection, ws_id: int, ref: str | int) -> sqlite3.Row | None:
+    """By its number or by its name, because a model will use either."""
+    ref = str(ref).strip().lstrip("#Ff")
+    if ref.isdigit():
+        row = conn.execute("SELECT * FROM file WHERE workspace_id = ? AND seq = ?",
+                           (ws_id, int(ref))).fetchone()
+        if row:
+            return row
+    return conn.execute(
+        "SELECT * FROM file WHERE workspace_id = ? AND name = ? COLLATE NOCASE",
+        (ws_id, str(ref).strip()),
+    ).fetchone()
+
+
+def file_bytes(row: sqlite3.Row) -> bytes:
+    return (db.files_dir() / str(row["workspace_id"]) / row["stored"]).read_bytes()
+
+
+def delete_file(conn: sqlite3.Connection, account_id: int, ws: sqlite3.Row, ref: str | int) -> None:
+    """Whoever uploaded it, or the project's owner."""
+    row = get_file(conn, ws["id"], ref)
+    if row is None:
+        raise Refused("No such file.")
+    if row["account_id"] != account_id and ws["role"] != "owner":
+        raise Refused("Only whoever uploaded it, or the project's owner, can remove a file.")
+    conn.execute("DELETE FROM file WHERE id = ?", (row["id"],))
+    # Only once no other project still points at the same bytes.
+    if not conn.execute("SELECT 1 FROM file WHERE sha256 = ?", (row["sha256"],)).fetchone():
+        (db.files_dir() / str(ws["id"]) / row["stored"]).unlink(missing_ok=True)
+
+
+GITHUB = re.compile(r"^https?://(www\.)?github\.com/([\w.\-]+)/([\w.\-]+)", re.I)
+
+
+def add_repo(conn: sqlite3.Connection, account_id: int, ws: sqlite3.Row, url: str,
+             branch: str = "", label: str = "") -> dict:
+    """Link a repository to the project. A reference, never a copy.
+
+    Every assistant already has a GitHub connector of its own; what is missing is
+    that the whole team knows which repository the project is about.
+    """
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise Refused("A repository link starts with http:// or https://.", "e_bad_repo")
+    match = GITHUB.match(url)
+    label = label.strip()[:80] or (f"{match.group(2)}/{match.group(3)}" if match
+                                   else url.split("//")[-1][:80])
+    repo_id = conn.execute(
+        "INSERT INTO repo (workspace_id, url, label, branch, account_id) VALUES (?, ?, ?, ?, ?)",
+        (ws["id"], url[:500], label, branch.strip()[:100] or None, account_id),
+    ).lastrowid
+    return dict(conn.execute("SELECT id, url, label, branch FROM repo WHERE id = ?",
+                             (repo_id,)).fetchone())
+
+
+def list_repos(conn: sqlite3.Connection, ws_id: int) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT id, url, label, branch FROM repo WHERE workspace_id = ? ORDER BY id", (ws_id,))]
+
+
+def remove_repo(conn: sqlite3.Connection, ws: sqlite3.Row, repo_id: int) -> None:
+    if ws["role"] != "owner":
+        raise Refused("Only the project's owner can unlink a repository.")
+    conn.execute("DELETE FROM repo WHERE id = ? AND workspace_id = ?", (repo_id, ws["id"]))
+
+
 # --- invites -------------------------------------------------------------------------
 
 
@@ -626,6 +762,12 @@ def _purge_project(conn: sqlite3.Connection, ws_id: int) -> None:
                  "(SELECT id FROM section WHERE workspace_id = ?)", (ws_id,))
     conn.execute("UPDATE section SET current_revision_id = NULL WHERE workspace_id = ?", (ws_id,))
     conn.execute("DELETE FROM artifact WHERE workspace_id = ?", (ws_id,))
+    # The uploaded bytes go too, or a purged project would leave its files on disk
+    # for ever with nothing left pointing at them.
+    for row in conn.execute("SELECT stored FROM file WHERE workspace_id = ?", (ws_id,)):
+        (db.files_dir() / str(ws_id) / row["stored"]).unlink(missing_ok=True)
+    conn.execute("DELETE FROM file WHERE workspace_id = ?", (ws_id,))
+    conn.execute("DELETE FROM repo WHERE workspace_id = ?", (ws_id,))
     # Entries point at each other (supersedes); unhook them before deleting.
     conn.execute("UPDATE event SET supersedes_id = NULL, section_id = NULL WHERE workspace_id = ?",
                  (ws_id,))
@@ -962,9 +1104,13 @@ def version(conn: sqlite3.Connection, ws_id: int) -> tuple:
         "SELECT COUNT(*) AS n, GROUP_CONCAT(account_id || role) AS r "
         "FROM membership WHERE workspace_id = ?", (ws_id,)
     ).fetchone()
+    extras = conn.execute(
+        "SELECT (SELECT COUNT(*) FROM file WHERE workspace_id = ?) AS f, "
+        "(SELECT COUNT(*) FROM repo WHERE workspace_id = ?) AS r", (ws_id, ws_id)
+    ).fetchone()
     ws = conn.execute("SELECT title, colour, deleted_at FROM workspace WHERE id = ?",
                       (ws_id,)).fetchone()
-    return (ev, rev, ms["n"], ms["r"], ws["title"] if ws else None,
+    return (ev, rev, ms["n"], ms["r"], extras["f"], extras["r"], ws["title"] if ws else None,
             ws["colour"] if ws else None, ws["deleted_at"] if ws else "gone")
 
 
@@ -981,6 +1127,8 @@ def snapshot(conn: sqlite3.Connection, ws_id: int) -> dict:
         "sections": [asdict(s) for s in _read_document(conn, ws_id)],
         "events": [asdict(e) for e in _events_since(conn, ws_id, 0, exclude_account=None)],
         "brief": asdict(build_brief(conn, ws_id)),
+        "files": list_files(conn, ws_id),
+        "repos": list_repos(conn, ws_id),
     }
 
 
@@ -996,6 +1144,8 @@ def catch_up(conn: sqlite3.Connection, account: sqlite3.Row, ws: sqlite3.Row) ->
         new_events=_events_since(conn, ws["id"], since, exclude_account=None),
         document=_read_document(conn, ws["id"]),
         brief=build_brief(conn, ws["id"]),
+        files=list_files(conn, ws["id"]),
+        repos=list_repos(conn, ws["id"]),
         hints=hints,
         state=_state(conn, ws["id"]),
     )

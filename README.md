@@ -30,6 +30,7 @@ app/store.py     everything the product does. No MCP, HTTP or browser code in it
 app/passwords.py hashing and checking passwords.
 app/auth.py      the optional Google sign-in.
 app/linking.py   the text that links a conversation to a project.
+app/files.py     storing uploads and pulling the text out of them.
 app/render.py    what an assistant actually reads back from a tool call.
 app/server.py    three surfaces over store.py: MCP, plain HTTP, and the web.
 app/static/      the web: board, graph, detail panel, account and project admin.
@@ -136,10 +137,15 @@ models cannot drift apart on what a decision is, because none of them is judging
 The detail panel in the web says which field a level came from, and whether it
 survives into the brief.
 
-## The two tools
+## The three tools
 
-- `catch_up(project)` — the brief, the document, then everything since your cursor.
+- `catch_up(project)` — the brief, the document, the files, then everything since your cursor.
 - `record(project, summary, details, kind, intent, rejected, refs, section, content, artifact, supersedes)`
+- `read_file(project, file, part)` — the contents of one file, on request.
+
+Two tools was the rule, and `read_file` is the exception that proves why: a file
+cannot ride along in `catch_up` without costing every assistant the rest of its
+context, so it has to be asked for.
 
 `project` is required on both; an unknown or missing one is refused with the
 list of projects the caller is in. Entry numbers count from #1 in each project,
@@ -151,6 +157,31 @@ model inventing a reason nobody gave.
 
 **Every response carries the delta.** You cannot push to an LLM, so the news
 rides along with whatever the assistant was already doing.
+
+## Files and repositories
+
+Files are **uploaded and kept**; repositories are **linked and never copied**.
+
+Upload anything into a project from the web and every assistant sees it listed
+in `catch_up` — one line each, with whether it can be read at all. The content
+waits for `read_file`, which hands it back in 8000-character parts. Text, code,
+PDF and .docx arrive as text; images come back as images; anything else says so
+rather than wasting a round trip. A file is listed by number (`F1`) or by name,
+and an upload goes through the log like anything else, so the team sees it
+arrive.
+
+A repository is stored as a link and a branch, nothing more. Every assistant
+already has a GitHub connector of its own, and whatever it reads through that is
+more current than any copy we could keep; what was missing was the whole team
+knowing which repository the project is about.
+
+Limits are 20 MB per file and 200 MB per project. Files are served from `/f/...`
+to members only, never inline except images and PDFs, under a sandbox CSP — a
+teammate's upload is not a place to run scripts from.
+
+**A file's text is wrapped as untrusted data** before an assistant sees it, in
+those words, because a document is exactly where an instruction aimed at someone
+else's assistant would be hidden.
 
 ## Connecting an assistant
 
@@ -185,5 +216,6 @@ one that works with every client.
 **Guarding against prompt injection between people.** The product is, by
 design, a channel for text one person's assistant wrote to enter another's
 context. Among friends that is fine; once projects hold people you do not fully
-trust, it is a real attack surface. The web marks every entry as data, never
-instructions — the assistants do not yet.
+trust, it is a real attack surface. File contents are already handed over
+wrapped as data, and the web marks every entry as data — but the entries
+themselves reach the assistants unwrapped.

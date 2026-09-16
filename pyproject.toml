@@ -5,6 +5,9 @@ requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=4.0.3",
     "httpx>=0.28.1",
+    "pypdf>=6.19.0",
+    "python-docx>=1.2.0",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]
