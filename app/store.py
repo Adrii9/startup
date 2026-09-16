@@ -519,12 +519,37 @@ def project_bytes(conn: sqlite3.Connection, ws_id: int) -> int:
     ).fetchone()["n"]
 
 
-def add_file(conn: sqlite3.Connection, account: sqlite3.Row, ws: sqlite3.Row, *,
-             name: str, mime: str, data: bytes, note: str = "") -> dict:
-    """Store an upload, pull out whatever text is in it, and tell the team.
+def _overwrite_hint(conn: sqlite3.Connection, account_id: int,
+                    existing: sqlite3.Row | None) -> str | None:
+    if existing is None or existing["account_id"] == account_id:
+        return None
+    when = existing["updated_at"] or existing["created_at"]
+    minutes = (_utcnow() - _parse(when)).total_seconds() / 60
+    if minutes > COLLISION_MINUTES:
+        return None
+    who = conn.execute("SELECT name FROM account WHERE id = ?",
+                       (existing["account_id"],)).fetchone()["name"]
+    return (f"{who} wrote v{existing['version']} of {existing['name']} {int(minutes)} min ago "
+            f"and you have just replaced it. Their version is still in the history -- "
+            f"check you are not undoing work that was done while you were writing.")
+
+
+def put_file(conn: sqlite3.Connection, account: sqlite3.Row, ws: sqlite3.Row, *,
+             name: str, data: bytes, mime: str = "", note: str = "",
+             agent: str = "web") -> tuple[dict, "Envelope"]:
+    """Store a file, as a new one or as the next version of the one with that name.
+
+    Same name means the same file. A teammate re-uploading `report.pdf` is
+    giving us a newer report, not a second one, and an assistant rewriting
+    `calculadora.py` is doing what anybody does with a file on disk. What was
+    there is kept as a version rather than written over, because whoever's work
+    just got replaced has to be able to see what it was.
 
     The text is extracted now rather than on every read: an assistant asking for
     a document should not be made to wait on a PDF parser.
+
+    Returns the file, and the envelope of the entry this wrote -- writing a file
+    is news, so it goes through the log like everything else.
     """
     name = files.safe_name(name)
     if not data:
@@ -539,41 +564,92 @@ def add_file(conn: sqlite3.Connection, account: sqlite3.Row, ws: sqlite3.Row, *,
     sha = files.digest(data)
     folder = db.files_dir() / str(ws["id"])
     folder.mkdir(parents=True, exist_ok=True)
+    # Named by its own hash, so a new version never lands on an old one's bytes
+    # and every version stays readable.
     stored = f"{sha[:16]}{Path(name).suffix.lower()[:12]}"
     path = folder / stored
     path.write_bytes(data)
     text, state = files.extract(path, name, mime)
 
-    file_id = conn.execute(
-        """INSERT INTO file (workspace_id, seq, account_id, name, mime, size, sha256,
-                             stored, text, state, note)
-           VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM file WHERE workspace_id = ?),
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (ws["id"], ws["id"], account["id"], name, mime, len(data), sha, stored,
-         text or None, state, note.strip()[:200] or None),
-    ).lastrowid
-    row = conn.execute("SELECT * FROM file WHERE id = ?", (file_id,)).fetchone()
+    existing = conn.execute(
+        "SELECT * FROM file WHERE workspace_id = ? AND name = ? COLLATE NOCASE",
+        (ws["id"], name),
+    ).fetchone()
 
-    # An upload is news, so it goes through the log like anything else. Nothing
-    # else in the product gets to write history behind the team's back either.
-    record(conn, account, ws, agent="web", summary=f"Added the file {name}",
-           details=note.strip()[:200], artifact=name)
-    return file_view(row)
+    # Rule 3, for files: someone else wrote this a moment ago and you have just
+    # replaced it. Nothing is lost -- their version is in the history -- but you
+    # are the one who has to be told, before you build on top of it.
+    collision = _overwrite_hint(conn, account["id"], existing)
+
+    if existing is None:
+        file_id = conn.execute(
+            """INSERT INTO file (workspace_id, seq, account_id, name, mime, size, sha256,
+                                 stored, text, state, note)
+               VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM file WHERE workspace_id = ?),
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ws["id"], ws["id"], account["id"], name, mime, len(data), sha, stored,
+             text or None, state, note.strip()[:200] or None),
+        ).lastrowid
+        summary = f"Added the file {name}"
+    else:
+        file_id = existing["id"]
+        # Archive what is there now, then move the file on to the new version.
+        conn.execute(
+            """INSERT INTO file_revision (file_id, account_id, version, mime, size, sha256,
+                                          stored, text, state, created_at)
+               SELECT id, account_id, version, mime, size, sha256, stored, text, state,
+                      COALESCE(updated_at, created_at)
+               FROM file WHERE id = ?""",
+            (file_id,),
+        )
+        conn.execute(
+            """UPDATE file SET account_id = ?, mime = ?, size = ?, sha256 = ?, stored = ?,
+                   text = ?, state = ?, note = COALESCE(?, note), version = version + 1,
+                   updated_at = datetime('now')
+               WHERE id = ?""",
+            (account["id"], mime, len(data), sha, stored, text or None, state,
+             note.strip()[:200] or None, file_id),
+        )
+        summary = f"Rewrote {name} (v{existing['version'] + 1})"
+
+    row = conn.execute("SELECT * FROM file WHERE id = ?", (file_id,)).fetchone()
+    env = record(conn, account, ws, agent=agent, summary=summary,
+                 details=note.strip()[:200], artifact=name)
+    if collision:
+        env.hints.append(collision)
+    return file_view(row), env
 
 
 def file_view(row: sqlite3.Row) -> dict:
     return {"id": row["seq"], "name": row["name"], "mime": row["mime"], "size": row["size"],
-            "state": row["state"], "note": row["note"], "created_at": row["created_at"]}
+            "state": row["state"], "note": row["note"], "version": row["version"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"] or row["created_at"]}
 
 
 def list_files(conn: sqlite3.Connection, ws_id: int) -> list[dict]:
-    """Metadata only. The text stays where it is until somebody asks for it."""
+    """Metadata only. The text stays where it is until somebody asks for it.
+
+    `member_name` is whoever wrote the version that is there now, not whoever
+    first created the file: when you are deciding what to read, what matters is
+    who put those words in front of you.
+    """
     rows = conn.execute(
         """SELECT f.*, a.name AS member_name FROM file f JOIN account a ON a.id = f.account_id
            WHERE f.workspace_id = ? ORDER BY f.seq""",
         (ws_id,),
     ).fetchall()
     return [{**file_view(r), "member_name": r["member_name"]} for r in rows]
+
+
+def file_history(conn: sqlite3.Connection, file_id: int) -> list[dict]:
+    """Every version before the one in force, newest first."""
+    return [dict(r) for r in conn.execute(
+        """SELECT v.version, v.size, v.state, v.created_at, a.name AS member_name
+           FROM file_revision v JOIN account a ON a.id = v.account_id
+           WHERE v.file_id = ? ORDER BY v.version DESC""",
+        (file_id,),
+    )]
 
 
 def get_file(conn: sqlite3.Connection, ws_id: int, ref: str | int) -> sqlite3.Row | None:
@@ -594,17 +670,36 @@ def file_bytes(row: sqlite3.Row) -> bytes:
     return (db.files_dir() / str(row["workspace_id"]) / row["stored"]).read_bytes()
 
 
+def _forget_bytes(conn: sqlite3.Connection, ws_id: int, stored: list[tuple[str, str]]) -> None:
+    """Drop bytes from disk, but only once nothing at all still points at them.
+
+    Files are stored under their own hash, so two uploads of the same thing --
+    or an old version of one file and the current version of another -- share a
+    single copy. Deleting either must not take the other's content with it.
+    """
+    for sha, name in stored:
+        still = conn.execute(
+            "SELECT 1 FROM file WHERE sha256 = ? "
+            "UNION ALL SELECT 1 FROM file_revision WHERE sha256 = ? LIMIT 1", (sha, sha)
+        ).fetchone()
+        if not still:
+            (db.files_dir() / str(ws_id) / name).unlink(missing_ok=True)
+
+
 def delete_file(conn: sqlite3.Connection, account_id: int, ws: sqlite3.Row, ref: str | int) -> None:
-    """Whoever uploaded it, or the project's owner."""
+    """Whoever wrote what is there now, or the project's owner. Versions go too."""
     row = get_file(conn, ws["id"], ref)
     if row is None:
         raise Refused("No such file.")
     if row["account_id"] != account_id and ws["role"] != "owner":
         raise Refused("Only whoever uploaded it, or the project's owner, can remove a file.")
+    stored = [(row["sha256"], row["stored"])] + [
+        (r["sha256"], r["stored"]) for r in conn.execute(
+            "SELECT sha256, stored FROM file_revision WHERE file_id = ?", (row["id"],))
+    ]
+    conn.execute("DELETE FROM file_revision WHERE file_id = ?", (row["id"],))
     conn.execute("DELETE FROM file WHERE id = ?", (row["id"],))
-    # Only once no other project still points at the same bytes.
-    if not conn.execute("SELECT 1 FROM file WHERE sha256 = ?", (row["sha256"],)).fetchone():
-        (db.files_dir() / str(ws["id"]) / row["stored"]).unlink(missing_ok=True)
+    _forget_bytes(conn, ws["id"], stored)
 
 
 GITHUB = re.compile(r"^https?://(www\.)?github\.com/([\w.\-]+)/([\w.\-]+)", re.I)
@@ -769,11 +864,17 @@ def _purge_project(conn: sqlite3.Connection, ws_id: int) -> None:
                  "(SELECT id FROM section WHERE workspace_id = ?)", (ws_id,))
     conn.execute("UPDATE section SET current_revision_id = NULL WHERE workspace_id = ?", (ws_id,))
     conn.execute("DELETE FROM artifact WHERE workspace_id = ?", (ws_id,))
-    # The uploaded bytes go too, or a purged project would leave its files on disk
-    # for ever with nothing left pointing at them.
-    for row in conn.execute("SELECT stored FROM file WHERE workspace_id = ?", (ws_id,)):
-        (db.files_dir() / str(ws_id) / row["stored"]).unlink(missing_ok=True)
+    # The uploaded bytes go too, every version of them, or a purged project would
+    # leave its files on disk for ever with nothing left pointing at them.
+    stored = [(r["sha256"], r["stored"]) for r in conn.execute(
+        """SELECT sha256, stored FROM file WHERE workspace_id = ?
+           UNION ALL
+           SELECT v.sha256, v.stored FROM file_revision v
+           JOIN file f ON f.id = v.file_id WHERE f.workspace_id = ?""", (ws_id, ws_id))]
+    conn.execute("DELETE FROM file_revision WHERE file_id IN "
+                 "(SELECT id FROM file WHERE workspace_id = ?)", (ws_id,))
     conn.execute("DELETE FROM file WHERE workspace_id = ?", (ws_id,))
+    _forget_bytes(conn, ws_id, stored)
     conn.execute("DELETE FROM repo WHERE workspace_id = ?", (ws_id,))
     # Entries point at each other (supersedes); unhook them before deleting.
     conn.execute("UPDATE event SET supersedes_id = NULL, section_id = NULL WHERE workspace_id = ?",

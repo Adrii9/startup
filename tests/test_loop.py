@@ -628,7 +628,82 @@ def test_collision_hint_when_someone_just_touched_the_section(conn):
 
 
 def upload(conn, account, ws, name, data, mime="", note=""):
-    return store.add_file(conn, account, ws, name=name, mime=mime, data=data, note=note)
+    return store.put_file(conn, account, ws, name=name, mime=mime, data=data, note=note)[0]
+
+
+def write(conn, account, ws, name, content, note=""):
+    """What an assistant does: text in, whole file out."""
+    return store.put_file(conn, account, ws, name=name, data=content.encode(),
+                          note=note, agent="claude")
+
+
+def test_an_assistant_writes_a_file_and_the_team_can_read_it(conn):
+    a, o, _, ws = team(conn)
+    view, env = write(conn, o, as_member(conn, o, ws), "calculadora.py",
+                      "def suma(a, b):\n    return a + b\n", note="la primera versio")
+    assert view["version"] == 1
+
+    out = cu(conn, a, ws)
+    assert "F1 · calculadora.py · readable" in out
+    assert "Added the file calculadora.py" in out      # it went through the log
+    assert "def suma" not in out                       # but not the contents
+    row = store.get_file(conn, ws["id"], "calculadora.py")
+    assert "def suma(a, b)" in row["text"]
+
+
+def test_rewriting_a_file_makes_a_version_and_keeps_the_last_one(conn):
+    a, o, _, ws = team(conn)
+    write(conn, a, as_member(conn, a, ws), "notes.md", "first draft")
+    view, env = write(conn, a, as_member(conn, a, ws), "notes.md", "second draft")
+
+    assert view["version"] == 2
+    assert len(store.list_files(conn, ws["id"])) == 1        # one file, not two
+    assert store.get_file(conn, ws["id"], "notes.md")["text"] == "second draft"
+
+    history = store.file_history(conn, store.get_file(conn, ws["id"], "notes.md")["id"])
+    assert [h["version"] for h in history] == [1]
+
+    # The rewrite is news to everyone else, and the listing says which version
+    # they would be reading.
+    teammate = cu(conn, o, ws)
+    assert "Rewrote notes.md (v2)" in teammate
+    assert "v2 by Adria" in teammate
+
+
+def test_the_old_version_of_a_file_is_still_on_disk(conn):
+    """Replacing someone's work has to be something you can look at afterwards."""
+    a, _, _, ws = team(conn)
+    write(conn, a, as_member(conn, a, ws), "notes.md", "the one that mattered")
+    write(conn, a, as_member(conn, a, ws), "notes.md", "the one that replaced it")
+
+    old = conn.execute("SELECT stored, text FROM file_revision").fetchone()
+    assert old["text"] == "the one that mattered"
+    assert (db.files_dir() / str(ws["id"]) / old["stored"]).read_bytes() == b"the one that mattered"
+
+
+def test_overwriting_what_a_teammate_just_wrote_says_so(conn):
+    a, o, _, ws = team(conn)
+    write(conn, o, as_member(conn, o, ws), "plan.md", "Oscar's plan")
+    _, env = write(conn, a, as_member(conn, a, ws), "plan.md", "Adria's plan")
+    out = render.render(env)
+    assert "Oscar wrote v1 of plan.md" in out
+    assert "still in the history" in out
+
+    # ...and rewriting your own work says nothing, because there is nothing to say.
+    _, env = write(conn, a, as_member(conn, a, ws), "plan.md", "Adria again")
+    assert "just replaced it" not in render.render(env)
+
+
+def test_deleting_a_file_takes_every_version_of_it(conn):
+    a, _, _, ws = team(conn)
+    me = as_member(conn, a, ws)
+    write(conn, a, me, "notes.md", "one")
+    write(conn, a, me, "notes.md", "two")
+    assert len(list((db.files_dir() / str(ws["id"])).iterdir())) == 2
+
+    store.delete_file(conn, a["id"], me, "notes.md")
+    assert conn.execute("SELECT COUNT(*) AS n FROM file_revision").fetchone()["n"] == 0
+    assert list((db.files_dir() / str(ws["id"])).iterdir()) == []
 
 
 def test_a_file_is_listed_for_everyone_but_its_content_waits_to_be_asked_for(conn):

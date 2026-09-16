@@ -187,8 +187,30 @@ CREATE TABLE IF NOT EXISTS file (
     text         TEXT,
     state        TEXT NOT NULL DEFAULT 'binary',
     note         TEXT,
+    version      INTEGER NOT NULL DEFAULT 1,
+    updated_at   TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (workspace_id, seq)
+);
+
+-- Every version of a file that is no longer the current one. The `file` row is
+-- the projection -- what the file is right now; this is the history behind it,
+-- so one assistant replacing another's work is something you can look at rather
+-- than something you discover by its absence. The old bytes stay on disk: they
+-- are named by their own hash, so a new version never overwrites an old one.
+CREATE TABLE IF NOT EXISTS file_revision (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id    INTEGER NOT NULL REFERENCES file(id),
+    event_id   INTEGER REFERENCES event(id),
+    account_id INTEGER NOT NULL REFERENCES account(id),
+    version    INTEGER NOT NULL,
+    mime       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    sha256     TEXT NOT NULL,
+    stored     TEXT NOT NULL,
+    text       TEXT,
+    state      TEXT NOT NULL DEFAULT 'binary',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- A repository the project is about. Deliberately a reference and not a copy:
@@ -292,3 +314,9 @@ def init_db() -> None:
         # UNIQUE column to a table that already exists.
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_account_username "
                      "ON account(username COLLATE NOCASE)")
+        # Files from before assistants could rewrite them are all version 1.
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(file)")}
+        if "version" not in have:
+            conn.execute("ALTER TABLE file ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        if "updated_at" not in have:
+            conn.execute("ALTER TABLE file ADD COLUMN updated_at TEXT")

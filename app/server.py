@@ -330,6 +330,53 @@ def read_file(
         return render.render_file(meta, row["text"] or "", part)
 
 
+@mcp.tool
+def write_file(
+    project: ProjectArg,
+    name: Annotated[
+        str,
+        Field(description=(
+            "What to call it, with its extension -- 'calculadora.py', 'notes.md'. "
+            "Writing a name that is already in the project replaces its contents "
+            "with what you send, as a new version; the old one is kept."
+        )),
+    ],
+    content: Annotated[
+        str,
+        Field(description="The whole file. Not a patch and not an excerpt: what you send is what the file becomes."),
+    ],
+    note: Annotated[
+        str,
+        Field(description=(
+            "One line for your teammates about what this is or what changed. "
+            "Optional; leave it out rather than inventing one."
+        )),
+    ] = "",
+) -> str:
+    """Put a file into the shared project, or rewrite one that is already there.
+
+    For work that has a shape of its own -- a script, a draft, a configuration,
+    a set of notes -- rather than for what you would say in a sentence. Anything
+    you write here every teammate's assistant can read with read_file, and people
+    can open and download from the web.
+
+    Read the file first if you are changing one: what you send replaces it whole,
+    so writing from memory is how somebody else's work disappears. Text only;
+    images and PDFs are uploaded by people from the web.
+    """
+    with db.connect() as conn:
+        account = _account(conn)
+        ws = _project(conn, account, project)
+        try:
+            view, env = store.put_file(conn, account, ws, name=name,
+                                       data=content.encode("utf-8"), note=note, agent=_agent())
+        except store.Refused as e:
+            raise ToolError(str(e))
+        env.result = (f"Wrote F{view['id']} {view['name']} (v{view['version']}) "
+                      f"in project '{ws['slug']}'.")
+        return render.render(env)
+
+
 # --- the same thing over plain HTTP, for clients that do not speak MCP --------------
 
 
@@ -833,9 +880,10 @@ async def api_upload(request: Request) -> JSONResponse:
         if ws is None:
             return JSONResponse(NOT_SIGNED_IN, status_code=401)
         try:
-            return JSONResponse(store.add_file(
+            view, _ = store.put_file(
                 conn, account, ws, name=upload.filename or "file",
-                mime=upload.content_type or "", data=data, note=form.get("note", "")))
+                mime=upload.content_type or "", data=data, note=form.get("note", ""))
+            return JSONResponse(view)
         except store.Refused as e:
             return _refused(e)
 

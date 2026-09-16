@@ -140,15 +140,17 @@ models cannot drift apart on what a decision is, because none of them is judging
 The detail panel in the web says which field a level came from, and whether it
 survives into the brief.
 
-## The three tools
+## The tools
 
 - `catch_up(project)` — the brief, the document, the files, then everything since your cursor.
 - `record(project, summary, details, kind, intent, rejected, refs, section, content, artifact, supersedes)`
 - `read_file(project, file, part)` — the contents of one file, on request.
+- `write_file(project, name, content, note)` — put a file in, or rewrite one.
 
-Two tools was the rule, and `read_file` is the exception that proves why: a file
-cannot ride along in `catch_up` without costing every assistant the rest of its
-context, so it has to be asked for.
+Two tools was the rule, and the file pair is the exception that proves why: a
+file cannot ride along in `catch_up` without costing every assistant the rest of
+its context, so it has to be asked for — and once an assistant can read one, the
+thing it will want next is to leave one behind.
 
 `project` is required on both; an unknown or missing one is refused with the
 list of projects the caller is in. Entry numbers count from #1 in each project,
@@ -172,6 +174,18 @@ PDF and .docx arrive as text; images come back as images; anything else says so
 rather than wasting a round trip. A file is listed by number (`F1`) or by name,
 and an upload goes through the log like anything else, so the team sees it
 arrive.
+
+Assistants write files too, with `write_file`: a script, a draft, a
+configuration, a set of notes — whatever has a shape of its own and would be
+lost inside a conversation. What it sends replaces the file whole, which is
+stated in the tool's own description, because writing from memory is how a
+teammate's work disappears.
+
+**Writing a name that already exists is a new version, not a second file.**
+Whatever was there is kept: the old bytes stay on disk under their own hash and
+the old text stays in `file_revision`, so replacing somebody's work is something
+they can look at rather than something they discover by its absence. If you
+overwrite a version a teammate wrote minutes ago, the answer says so.
 
 A repository is stored as a link and a branch, nothing more. Every assistant
 already has a GitHub connector of its own, and whatever it reads through that is

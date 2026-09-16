@@ -93,12 +93,15 @@ def _files_block(files: list[dict]) -> str:
     out = []
     for f in files:
         state = READABLE.get(f["state"], "could not be read")
-        out.append(f"F{f['id']} · {f['name']} · {state} · {_size(f['size'])} · "
-                   f"added by {f['member_name']}")
+        # The version is here so that "I read this already" and "this is what it
+        # says now" stop being the same sentence.
+        version = f"v{f.get('version', 1)} by {f['member_name']}"
+        out.append(f"F{f['id']} · {f['name']} · {state} · {_size(f['size'])} · {version}")
         if f.get("note"):
             out.append(f"      {f['note']}")
     out.append("")
-    out.append('Call read_file(project, file="F1" or a name) for the content of one.')
+    out.append('Call read_file(project, file="F1" or a name) for the content of one, '
+               "and write_file to add one or rewrite one.")
     return "\n".join(out)
 
 
@@ -136,13 +139,16 @@ def render_file(meta: dict, text: str, part: int = 1) -> str:
     part = min(max(1, part), total)
     chunk = text[(part - 1) * PART_CHARS: part * PART_CHARS]
 
-    head = [f"F{meta['id']} · {meta['name']} · {_size(meta['size'])} · "
-            f"added by {meta.get('member_name', '?')}"]
+    head = [f"F{meta['id']} · {meta['name']} · v{meta.get('version', 1)} · "
+            f"{_size(meta['size'])} · by {meta.get('member_name', '?')}"]
     if meta.get("note"):
         head.append(f"note: {meta['note']}")
     if total > 1:
         head.append(f"Part {part} of {total}. For the next one, call read_file again "
                     f"with part={part + 1}.")
+    if meta.get("version", 1) > 1:
+        head.append("Rewriting this replaces it whole, so send back everything you "
+                    "want kept, not only what you changed.")
     return "\n".join(head) + f"\n{RULE}\n{chunk}\n{RULE}\n{UNTRUSTED}"
 
 

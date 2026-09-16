@@ -467,9 +467,12 @@ function renderFiles() {
     main.href = `/f/${encodeURIComponent(S.slug)}/${f.id}`;
     main.target = '_blank'; main.rel = 'noopener';
     main.append(el('b', null, f.name));
+    // The version only appears once there is more than one: until then it is
+    // noise, and after that it is the difference between two readings.
+    const ver = f.version > 1 ? t('f_version', { v: f.version }) + ' · ' : '';
     main.append(el('span', 'item-sub',
       `${t('f_' + (f.state.startsWith('error') ? 'error' : f.state))} · ${sizeOf(f.size)} · ` +
-      t('f_added_by', { n: f.member_name })));
+      ver + t('f_added_by', { n: f.member_name })));
     if (f.note) main.append(el('span', 'item-sub', f.note));
     const acts = el('div', 'item-acts');
     acts.append(btn('ghost-btn small danger-text', t('f_delete'), async ev => {
@@ -498,7 +501,8 @@ async function uploadFiles(list) {
         toast(errMsg({ message: data.error || r.statusText, code: data.code, params: data.params }));
         break;
       }
-      toast(t('t_uploaded', { n: file.name }));
+      toast(data.version > 1 ? t('t_updated', { n: data.name, v: data.version })
+                             : t('t_uploaded', { n: file.name }));
     }
   } finally {
     span.textContent = t('f_upload');
