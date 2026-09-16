@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import secrets
 import time
@@ -885,8 +886,31 @@ class TokenPath:
         await self.app(scope, receive, send)
 
 
+def _apply_password_reset() -> None:
+    """RESET_PASSWORD="username:the new password", applied once at startup.
+
+    Deliberately blunt: it runs on every boot while the variable is set, and says
+    so loudly, because a forgotten variable would quietly undo a later password
+    change. Remove it as soon as you are back in.
+    """
+    raw = os.environ.get("RESET_PASSWORD", "").strip()
+    if not raw:
+        return
+    username, _, new = raw.partition(":")
+    with db.connect() as conn:
+        try:
+            store.reset_password(conn, username, new)
+        except store.Refused as e:
+            print(f"RESET_PASSWORD did nothing: {e}", flush=True)
+            return
+    print(f"RESET_PASSWORD: the password for {username!r} was reset and its sessions "
+          "ended. REMOVE THIS VARIABLE NOW -- while it is set, every deploy resets "
+          "that password again.", flush=True)
+
+
 def build_app():
     db.init_db()
+    _apply_password_reset()
     with db.connect() as conn:
         purged = store.purge_deleted_projects(conn)
     if purged:

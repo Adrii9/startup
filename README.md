@@ -64,9 +64,11 @@ With a username and a password. Nothing to configure.
 - Changing your password signs out every other browser you were signed in on.
 - Usernames are unique regardless of case and may use any alphabet ("Adrià").
 
-**There is no password reset**, because the server sends no email. Someone who
-forgets theirs makes a new account and is invited back; what they wrote under the
-old one stays. That is a deliberate MVP trade-off, not an oversight.
+**There is no self-service password reset**, because the server sends no email.
+Whoever runs the server sets `RESET_PASSWORD="username:the new password"`,
+redeploys, and **removes the variable again** — it applies on every boot while it
+is set, and ends that account's sessions. It grants nothing new: anyone who can
+set an environment variable can already replace the code and read the database.
 
 Google sign-in is built too, and stays hidden unless configured. To switch it on,
 set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `PUBLIC_URL`, and register

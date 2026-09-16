@@ -222,6 +222,32 @@ def change_password(conn: sqlite3.Connection, account_id: int, current: str, new
                  (account_id, _hash(keep_session) if keep_session else ""))
 
 
+def reset_password(conn: sqlite3.Connection, username: str, new: str) -> sqlite3.Row:
+    """Set someone's password without knowing the old one.
+
+    There is no self-service reset, because nothing here sends email. This is the
+    way back in for whoever runs the server, driven by an environment variable --
+    which grants no new power, since anyone who can set one can already replace
+    the code and read the database.
+
+    Every session of that account is ended: if the password had to be reset
+    because someone else had it, leaving their browser signed in defeats it.
+    """
+    if len(new or "") < passwords.MIN_LENGTH:
+        raise Refused(f"A password needs at least {passwords.MIN_LENGTH} characters.",
+                      "e_password_short", n=passwords.MIN_LENGTH)
+    row = conn.execute(
+        "SELECT * FROM account WHERE username = ? COLLATE NOCASE AND deleted_at IS NULL",
+        ((username or "").strip(),),
+    ).fetchone()
+    if row is None:
+        raise Refused(f"No account called {username!r}.")
+    conn.execute("UPDATE account SET password_hash = ? WHERE id = ?",
+                 (passwords.hash_password(new), row["id"]))
+    conn.execute("DELETE FROM session WHERE account_id = ?", (row["id"],))
+    return row
+
+
 def account_from_google(conn: sqlite3.Connection, sub: str, email: str, name: str,
                         picture: str = "") -> sqlite3.Row:
     """Find or create the account for a Google identity.

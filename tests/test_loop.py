@@ -143,6 +143,44 @@ def test_changing_the_password_signs_out_every_other_browser(conn):
     assert store.account_for_session(conn, elsewhere) is None
 
 
+def test_the_operator_can_reset_a_forgotten_password(conn):
+    """The only way back in when someone forgets: there is no email to send one."""
+    a = acc(conn, "Adrii9")
+    open_browser = store.create_session(conn, a["id"])
+
+    store.reset_password(conn, "adrii9", "una contrasenya nova")     # case-insensitive
+    assert store.verify_login(conn, "Adrii9", PASSWORD) is None
+    assert store.verify_login(conn, "Adrii9", "una contrasenya nova")["id"] == a["id"]
+    # Whoever was signed in as them is signed out, in case that was the problem.
+    assert store.account_for_session(conn, open_browser) is None
+
+    with pytest.raises(store.Refused, match="at least"):
+        store.reset_password(conn, "Adrii9", "curta")
+    with pytest.raises(store.Refused, match="No account"):
+        store.reset_password(conn, "nobody-at-all", "una contrasenya nova")
+
+
+def test_the_reset_variable_is_applied_at_startup(tmp_path, monkeypatch):
+    from app import server
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "reset.db")
+    db.init_db()
+    with db.connect() as c:
+        acc(c, "Adrii9")
+
+    monkeypatch.setenv("RESET_PASSWORD", "Adrii9:tornem-hi de nou")
+    server._apply_password_reset()
+    with db.connect() as c:
+        assert store.verify_login(c, "Adrii9", "tornem-hi de nou") is not None
+
+    # A malformed or impossible value must not stop the server from booting.
+    for bad in ("no-colon-here", "Adrii9:curta", "ningu:una contrasenya nova", ""):
+        monkeypatch.setenv("RESET_PASSWORD", bad)
+        server._apply_password_reset()
+    with db.connect() as c:
+        assert store.verify_login(c, "Adrii9", "tornem-hi de nou") is not None
+
+
 def test_a_deleted_account_frees_its_username_without_inheriting_its_past(conn):
     a, o, _, ws = team(conn)
     rec(conn, o, ws, kind="fact", summary="written by the first Oscar")
