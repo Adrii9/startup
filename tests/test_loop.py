@@ -1067,6 +1067,18 @@ def test_files_are_out_of_reach_of_anyone_not_in_the_project(web):
                     files={"file": ("x.txt", b"x", "text/plain")}).status_code == 404
 
 
+def test_healthz_says_where_the_data_lives_without_signing_in(web):
+    """The one page that has to work for someone who is locked out."""
+    h = web.get("/healthz").json()
+    assert h["db"].endswith(".db")
+    assert h["starts"] >= 1
+    assert "verdict" in h
+    # and nothing about anybody
+    body = web.get("/healthz").text
+    for leak in ("Adria", "account", "member", "project"):
+        assert leak not in body
+
+
 def test_linking_a_repository_over_http(web):
     sign_in(web, "Adria")
     slug = web.post("/api/projects", json={"title": "TFG"}).json()["slug"]

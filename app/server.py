@@ -483,6 +483,31 @@ def _count(key: str) -> None:
 TOO_MANY = {"error": "Too many attempts. Wait a few minutes and try again.", "code": "e_too_many"}
 
 
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request: Request) -> JSONResponse:
+    """Where the data lives, and whether it is surviving restarts.
+
+    Deliberately open: the person who needs this is the one who cannot sign in,
+    and by then "check the deploy logs" is advice they may not be able to take.
+    It says nothing about anybody -- no names, no counts of people, no projects --
+    only where the file is and how many starts it has seen.
+    """
+    mount = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    with db.connect() as conn:
+        seen = conn.execute(
+            "SELECT COUNT(*) AS n, MIN(started_at) AS first FROM boot").fetchone()
+    return JSONResponse({
+        "db": str(db.DB_PATH),
+        "volume": mount,
+        "on_volume": bool(mount) and str(db.DB_PATH).startswith(mount.rstrip("/") + "/"),
+        "db_bytes": db.DB_PATH.stat().st_size if db.DB_PATH.exists() else 0,
+        "starts": seen["n"],
+        "first_start": seen["first"],
+        "verdict": ("data is being kept" if seen["n"] > 1 else
+                    "nothing has survived a restart yet -- deploy again and look here"),
+    })
+
+
 @mcp.custom_route("/api/config", methods=["GET"])
 async def api_config(request: Request) -> JSONResponse:
     return JSONResponse({"google": auth.configured()})

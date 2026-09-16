@@ -213,6 +213,18 @@ CREATE TABLE IF NOT EXISTS file_revision (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- One row per server start. It is the only way, from outside, to tell a database
+-- that is surviving restarts from one that is being recreated by every deploy:
+-- a log that has been through nine boots is on a real disk, and one that reports
+-- a single boot after three deploys is being wiped every time. Nothing personal
+-- is in here, so /healthz can say it out loud to someone who cannot sign in.
+CREATE TABLE IF NOT EXISTS boot (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    db_path    TEXT NOT NULL,
+    volume     TEXT
+);
+
 -- A repository the project is about. Deliberately a reference and not a copy:
 -- every assistant already has its own GitHub connector, and a mirror of ours
 -- would only ever be a staler version of what they can already read.
@@ -320,3 +332,9 @@ def init_db() -> None:
             conn.execute("ALTER TABLE file ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
         if "updated_at" not in have:
             conn.execute("ALTER TABLE file ADD COLUMN updated_at TEXT")
+        conn.execute("INSERT INTO boot (db_path, volume) VALUES (?, ?)",
+                     (str(DB_PATH), mount))
+        seen = conn.execute("SELECT COUNT(*) AS n, MIN(started_at) AS first FROM boot").fetchone()
+        print(f"This database has now been through {seen['n']} start(s); the first was "
+              f"{seen['first']}. If that number is not going up across deploys, the data "
+              f"is not on a persistent disk.", flush=True)
